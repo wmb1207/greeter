@@ -256,7 +256,7 @@ def launch_session(pw : LibC::Passwd)
   # not exposed via /run/current-system/sw/bin.  Find coreutils and util-linux
   # directly in /nix/store so startx can locate them regardless of profile state.
   nix_extra = [] of String
-  ["coreutils", "util-linux"].each do |pkg|
+  ["coreutils", "util-linux", "xinit"].each do |pkg|
     Dir.glob("/nix/store/*-#{pkg}-*/bin").each { |d| nix_extra << d }
   end
 
