@@ -292,12 +292,15 @@ def launch_session(pw : LibC::Passwd)
 
   # Minimal, clean environment for the X session.
   # clear_env: true ensures no root-owned variables leak into the session.
+  # ENV tells ksh/loksh which rc file to source for interactive subshells
+  # (terminal emulators inside the X session).
   env = {
     "HOME"    => home,
     "USER"    => user,
     "SHELL"   => shell,
     "LOGNAME" => user,
     "PATH"    => session_path,
+    "ENV"     => "#{home}/.kshrc",
   }
 
   puts "Starting fvwm3 session for #{user}..."
@@ -323,13 +326,14 @@ def launch_session(pw : LibC::Passwd)
     # which breaks anything that relies on a sane working directory.
     Dir.cd(home)
 
-    # exec replaces this child image; on failure an exception is raised.
-    # Exec startx directly (no shell wrapper) so the PATH we built above
-    # is not overwritten by /etc/profile being sourced by a login shell.
+    # Run startx through a login shell so ~/.profile (and via it the
+    # home-manager session vars) is sourced before X starts.  Using
+    # `exec "$@"` with positional args avoids any shell-injection risk —
+    # startx_cmd is never interpolated into the script string.
     begin
       Process.exec(
-        command:   startx_cmd,
-        args:      ["fvwm3", "--", ":0", "vt1"],
+        command:   shell,
+        args:      ["-l", "-c", "exec \"$@\"", "--", startx_cmd, "fvwm3", "--", ":0", "vt1"],
         env:       env,
         clear_env: true
       )
