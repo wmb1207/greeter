@@ -90,6 +90,13 @@ lib LibC
   # Crystal's Pointer(T).malloc uses the Boehm GC allocator, which is
   # incompatible with libc free() and causes heap corruption.
   fun calloc(nmemb : SizeT, size : SizeT) : Void*
+
+  # ttyname(3): return the path of the terminal attached to fd (e.g. "/dev/tty1").
+  fun ttyname(fd : Int) : Char*
+
+  # chown(2): change ownership of a file.  Called before privilege drop so the
+  # user's session can open the virtual console that Xorg needs.
+  fun chown(path : Char*, owner : UInt, group : UInt) : Int
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -297,6 +304,15 @@ def launch_session(pw : LibC::Passwd)
 
   child = Process.fork do
     # ── child ──────────────────────────────────────────────────────────────
+    # Give the user ownership of the current TTY before dropping privileges.
+    # Xorg needs to open the virtual console (e.g. /dev/tty1) as the session
+    # user; without this chown it gets EACCES ("permission denied cannot open
+    # virtual console 1").  We still have root here, so the chown succeeds.
+    tty_path = LibC.ttyname(STDIN.fd)
+    unless tty_path.null?
+      LibC.chown(tty_path, pw.pw_uid, pw.pw_gid)
+    end
+
     unless drop_privileges(pw)
       STDERR.puts "greeter: privilege drop failed; session aborted"
       exit 1
