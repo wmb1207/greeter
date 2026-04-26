@@ -318,6 +318,11 @@ def launch_session(pw : LibC::Passwd)
       exit 1
     end
 
+    # Change into the user's home directory so $PWD matches $HOME.
+    # Without this the process inherits the greeter's cwd (typically /)
+    # which breaks anything that relies on a sane working directory.
+    Dir.cd(home)
+
     # exec replaces this child image; on failure an exception is raised.
     # Exec startx directly (no shell wrapper) so the PATH we built above
     # is not overwritten by /etc/profile being sourced by a login shell.
