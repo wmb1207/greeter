@@ -276,7 +276,12 @@ def launch_session(pw : LibC::Passwd)
   # Resolve startx to an absolute path by searching session_path directly.
   # Process.find_executable uses the greeter's live PATH (minimal on a TTY/init),
   # so we search the extended session_path we built above instead.
-  startx_cmd = session_path.split(":").map { |d| "#{d}/startx" }.find { |p| File.executable?(p) } || "startx"
+  startx_cmd = session_path.split(":").map { |d| "#{d}/startx" }.find { |p| File.executable?(p) }
+  if startx_cmd.nil?
+    STDERR.puts "greeter: startx not found in session PATH: #{session_path}"
+    return
+  end
+  STDERR.puts "greeter: startx resolved to #{startx_cmd}"
 
   # Minimal, clean environment for the X session.
   # clear_env: true ensures no root-owned variables leak into the session.
