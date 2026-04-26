@@ -61,8 +61,15 @@ lib LibPAM
                 conv : PamConv*, pamh : PamHandle*) : Int32
   fun pam_authenticate(pamh : PamHandle, flags : Int32) : Int32
   fun pam_acct_mgmt(pamh : PamHandle, flags : Int32) : Int32
+  fun pam_open_session(pamh : PamHandle, flags : Int32) : Int32
+  fun pam_close_session(pamh : PamHandle, flags : Int32) : Int32
   fun pam_end(pamh : PamHandle, status : Int32) : Int32
   fun pam_strerror(pamh : PamHandle, errnum : Int32) : UInt8*
+  # Returns a null-terminated array of "KEY=VALUE" strings representing
+  # all environment variables set by PAM modules (e.g. pam_systemd sets
+  # XDG_SESSION_ID, DBUS_SESSION_BUS_ADDRESS, etc.).  The array itself
+  # and each string are malloc-allocated; caller must free them.
+  fun pam_getenvlist(pamh : PamHandle) : UInt8**
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -175,11 +182,10 @@ end
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Authenticate username + password against the "login" PAM service.
-# Returns true on success; false on any failure.
+# Returns the live PamHandle on success so the caller can open a session
+# with it; returns nil on any failure (pam_end is called internally).
 # The password is never written to disk or to any log.
-def authenticate(username : String, password : String) : Bool
-  # Box the password String so pam_conversation can retrieve it via appdata_ptr
-  # without relying on a global variable.
+def authenticate(username : String, password : String) : LibPAM::PamHandle?
   box = Box.box(password)
 
   conv             = LibPAM::PamConv.new
@@ -190,22 +196,25 @@ def authenticate(username : String, password : String) : Bool
   ret  = LibPAM.pam_start("login", username, pointerof(conv), pointerof(pamh))
   unless ret == LibPAM::PAM_SUCCESS
     STDERR.puts "greeter: pam_start failed (#{ret})"
-    return false
+    return nil
   end
 
-  begin
-    # Step 1: verify the supplied credentials.
-    ret = LibPAM.pam_authenticate(pamh, 0)
-    return false unless ret == LibPAM::PAM_SUCCESS
-
-    # Step 2: check the account is usable (not expired, not locked, etc.).
-    ret = LibPAM.pam_acct_mgmt(pamh, 0)
-    ret == LibPAM::PAM_SUCCESS
-  ensure
-    # Always end the PAM transaction, passing the last status code so
-    # modules can do appropriate cleanup.
+  # Step 1: verify the supplied credentials.
+  ret = LibPAM.pam_authenticate(pamh, 0)
+  unless ret == LibPAM::PAM_SUCCESS
     LibPAM.pam_end(pamh, ret)
+    return nil
   end
+
+  # Step 2: check the account is usable (not expired, not locked, etc.).
+  ret = LibPAM.pam_acct_mgmt(pamh, 0)
+  unless ret == LibPAM::PAM_SUCCESS
+    LibPAM.pam_end(pamh, ret)
+    return nil
+  end
+
+  # Return the live handle — caller must call pam_close_session + pam_end.
+  pamh
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -253,7 +262,7 @@ end
 # The parent blocks in child.wait until the X session terminates, then
 # returns to the greeter loop.
 
-def launch_session(pw : LibC::Passwd)
+def launch_session(pw : LibC::Passwd, pamh : LibPAM::PamHandle)
   user  = String.new(pw.pw_name)
   home  = String.new(pw.pw_dir)
   shell = String.new(pw.pw_shell)
@@ -286,22 +295,60 @@ def launch_session(pw : LibC::Passwd)
   startx_cmd = session_path.split(":").map { |d| "#{d}/startx" }.find { |p| File.executable?(p) }
   if startx_cmd.nil?
     STDERR.puts "greeter: startx not found in session PATH: #{session_path}"
+    LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
     return
   end
   STDERR.puts "greeter: startx resolved to #{startx_cmd}"
+
+  # Register the session with systemd-logind.  This creates /run/user/<uid>,
+  # starts the user's systemd slice (and with it PipeWire/PulseAudio), and
+  # sets up the PAM environment for the session.  Without this call there is
+  # no audio because the audio server never starts.
+  ret = LibPAM.pam_open_session(pamh, 0)
+  if ret != LibPAM::PAM_SUCCESS
+    STDERR.puts "greeter: pam_open_session failed (#{ret}) — audio may be unavailable"
+  end
+
+  # Collect environment variables written by PAM modules (pam_systemd in
+  # particular sets XDG_SESSION_ID and DBUS_SESSION_BUS_ADDRESS which are
+  # required for PipeWire / D-Bus to work in the session).
+  pam_env = {} of String => String
+  envlist = LibPAM.pam_getenvlist(pamh)
+  unless envlist.null?
+    i = 0
+    while !(ptr = envlist[i]).null?
+      pair = String.new(ptr)
+      eq   = pair.index('=')
+      pam_env[pair[0...eq]] = pair[(eq + 1)..] if eq
+      i += 1
+    end
+  end
 
   # Minimal, clean environment for the X session.
   # clear_env: true ensures no root-owned variables leak into the session.
   # ENV tells ksh/loksh which rc file to source for interactive subshells
   # (terminal emulators inside the X session).
   env = {
-    "HOME"    => home,
-    "USER"    => user,
-    "SHELL"   => shell,
-    "LOGNAME" => user,
-    "PATH"    => session_path,
-    "ENV"     => "#{home}/.kshrc",
+    "HOME"              => home,
+    "USER"              => user,
+    "SHELL"             => shell,
+    "LOGNAME"           => user,
+    "PATH"              => session_path,
+    "ENV"               => "#{home}/.kshrc",
+    # Required by PipeWire / PulseAudio to locate their socket.
+    # pam_open_session (via pam_systemd) creates this directory;
+    # we set it explicitly so the child always has the right value.
+    "XDG_RUNTIME_DIR"   => "/run/user/#{pw.pw_uid}",
+    # Tells systemd-logind / D-Bus what kind of session this is.
+    "XDG_SESSION_TYPE"  => "x11",
+    "XDG_SESSION_CLASS" => "user",
+    "XDG_SEAT"          => "seat0",
+    "XDG_VTNR"          => "1",
   }
+
+  # Merge PAM-supplied variables (e.g. XDG_SESSION_ID, DBUS_SESSION_BUS_ADDRESS
+  # from pam_systemd) without overwriting the values we set explicitly above.
+  pam_env.each { |k, v| env[k] ||= v }
 
   puts "Starting fvwm3 session for #{user}..."
 
@@ -350,6 +397,11 @@ def launch_session(pw : LibC::Passwd)
   else
     puts "Session exited (code #{status.exit_code})."
   end
+
+  # Close the PAM session (tears down the systemd-logind session, stops user
+  # services) then end the transaction.
+  LibPAM.pam_close_session(pamh, 0)
+  LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -391,7 +443,8 @@ loop do
   next if password.empty?   # e.g. empty line or signal-interrupted read
 
   # ── authenticate via PAM ──────────────────────────────────────────────────
-  unless authenticate(username, password)
+  pamh = authenticate(username, password)
+  unless pamh
     puts "Login incorrect."
     sleep 2.seconds   # brief delay to slow brute-force attempts
     next
@@ -400,6 +453,7 @@ loop do
   pw = find_user(username)
   unless pw
     STDERR.puts "greeter: no passwd entry for '#{username}'"
+    LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
     next
   end
 
@@ -418,16 +472,20 @@ loop do
 
   case choice
   when "1"
-    launch_session(pw)
+    launch_session(pw, pamh)   # launch_session owns pamh; calls pam_close_session + pam_end
     puts "Returning to login prompt."
   when "2"
+    LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
     puts "Goodbye."
     exit 0
   when "3"
+    LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
     do_reboot
   when "4"
+    LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
     do_shutdown
   else
+    LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
     puts "Unknown choice '#{choice}'; back to login."
   end
 end
