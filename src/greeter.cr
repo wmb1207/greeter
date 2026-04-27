@@ -449,6 +449,13 @@ def do_shutdown
   puts "  [stub] shutdown — would exec: systemctl poweroff"
 end
 
+def clear_screen
+  # \e[2J → clear screen
+  # \e[H  → move cursor to top-left
+  STDOUT.print "\e[2J\e[H"
+  STDOUT.flush
+end
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Main greeter loop
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -459,11 +466,13 @@ end
 
 Signal::INT.trap { puts "\n[Ctrl+C — back to login]" }
 
-puts "\n+-----------------------------+"
-puts   "|  Crystal TTY Login Greeter  |"
-puts   "+-----------------------------+"
-
 loop do
+  clear_screen
+
+  puts "\n+----------------------+"
+  puts   "|  WMB  Login Greeter  |"
+  puts   "+----------------------+"
+
   # ── flush stale input before prompting ────────────────────────────────────
   LibC.tcflush(STDIN.fd, LibC::TCIFLUSH)
 
