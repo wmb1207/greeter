@@ -113,9 +113,8 @@ lib LibC
   fun chown(path : Char*, owner : UInt, group : UInt) : Int
 
   # tcflush(3): discard queued terminal I/O.
-  # TCIFLUSH (0) discards data received but not yet read — used to clear any
+  # TCIFLUSH discards data received but not yet read — used to clear any
   # stale keystrokes before presenting the login prompt.
-  TCIFLUSH = 0
   fun tcflush(fd : Int, queue_selector : Int) : Int
 end
 
