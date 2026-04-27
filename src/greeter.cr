@@ -277,6 +277,7 @@ def launch_session(pw : LibC::Passwd, pamh : LibPAM::PamHandle)
   end
 
   base_dirs = [
+    "#{home}/.local/bin",
     "#{home}/.nix-profile/bin",
     "/nix/var/nix/profiles/per-user/#{user}/bin",
     "/run/current-system/sw/bin",
