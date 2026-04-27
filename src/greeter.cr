@@ -374,14 +374,20 @@ def launch_session(pw : LibC::Passwd, pamh : LibPAM::PamHandle)
     # which breaks anything that relies on a sane working directory.
     Dir.cd(home)
 
-    # Run startx through a login shell so ~/.profile (and via it the
-    # home-manager session vars) is sourced before X starts.  Using
-    # `exec "$@"` with positional args avoids any shell-injection risk —
-    # startx_cmd is never interpolated into the script string.
+    # Run the X session inside a systemd user scope so that logind tracks
+    # the session cgroup and cleans up all child processes when X exits.
+    # The login shell sources ~/.profile first (giving us the full HM PATH),
+    # then exec's systemd-run which creates the scope and execs startx.
+    # --scope   : transient scope unit (systemd-run stays in the PID chain
+    #             so the parent's wait() still works correctly)
+    # --collect : auto-remove the unit after it exits
+    # Using `exec "$@"` with positional args avoids shell-injection risk.
     begin
       Process.exec(
         command:   shell,
-        args:      ["-l", "-c", "exec \"$@\"", "--", startx_cmd, "fvwm3", "--", ":0", "vt1"],
+        args:      ["-l", "-c", "exec \"$@\"", "--",
+                   "systemd-run", "--user", "--scope", "--collect",
+                   "--", startx_cmd, "fvwm3", "--", ":0", "vt1"],
         env:       env,
         clear_env: true
       )
