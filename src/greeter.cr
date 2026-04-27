@@ -476,7 +476,7 @@ end
 # Returns {right_col, rows} — right_col is where content should start.
 def draw_sidebar : {Int32, Int32}
   rows, cols = term_size
-  bar_col = [cols / 5, 4].max
+  bar_col = Math.max(cols // 5, 4)
   rows.times { |r| STDOUT.print "\e[#{r + 1};#{bar_col}H│" }
   STDOUT.flush
   {bar_col + 2, rows}
@@ -499,7 +499,7 @@ loop do
   _, rows = draw_sidebar
   # draw_sidebar returns {bar_col + 2, rows}; recover bar_col to get panel_width.
   _, cols = term_size
-  bar_col     = [cols / 5, 4].max
+  bar_col     = [cols // 5, 4].max
   panel_width = bar_col - 1   # usable columns in the left panel
 
   # ── header box (scales to panel width) ────────────────────────────────────
@@ -507,7 +507,7 @@ loop do
   title = "WMB Greeter"
   title = title[0, inner] if title.size > inner
   pad   = inner - title.size
-  lpad  = pad / 2
+  lpad  = pad // 2
   rpad  = pad - lpad
   STDOUT.print "\e[1;1H#{"+" + "-" * inner + "+"}"
   STDOUT.print "\e[2;1H#{"|" + " " * lpad + title + " " * rpad + "|"}"
