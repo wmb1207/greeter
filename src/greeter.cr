@@ -116,6 +116,18 @@ lib LibC
   # TCIFLUSH discards data received but not yet read — used to clear any
   # stale keystrokes before presenting the login prompt.
   fun tcflush(fd : Int, queue_selector : Int) : Int
+
+  # TIOCGWINSZ ioctl: query terminal window size.
+  TIOCGWINSZ = 0x5413_u64
+
+  struct Winsize
+    ws_row    : UInt16
+    ws_col    : UInt16
+    ws_xpixel : UInt16
+    ws_ypixel : UInt16
+  end
+
+  fun ioctl(fd : Int, request : ULong, ...) : Int
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -169,9 +181,6 @@ end
 # Read one line from stdin without echoing characters.
 # The terminal is always restored before returning (even on error/signal).
 def read_password : String
-  STDOUT.print "Password: "
-  STDOUT.flush
-
   fd       = STDIN.fd
   old_term = LibC::Termios.new
   LibC.tcgetattr(fd, pointerof(old_term))
@@ -185,7 +194,6 @@ def read_password : String
   ensure
     # Restore original terminal settings unconditionally.
     LibC.tcsetattr(fd, LibC::TCSANOW, pointerof(old_term))
-    STDOUT.puts   # emit the newline the hidden Enter key didn't echo
   end
 end
 
@@ -456,6 +464,24 @@ def clear_screen
   STDOUT.flush
 end
 
+# Query the terminal dimensions via TIOCGWINSZ.
+# Falls back to 24x80 if the ioctl fails (e.g. redirected stdio).
+def term_size : {Int32, Int32}
+  ws = LibC::Winsize.new
+  ret = LibC.ioctl(STDOUT.fd, LibC::TIOCGWINSZ, pointerof(ws))
+  (ret == 0 && ws.ws_col > 0) ? {ws.ws_row.to_i, ws.ws_col.to_i} : {24, 80}
+end
+
+# Draw a full-height vertical bar at 20% of the terminal width.
+# Returns {right_col, rows} — right_col is where content should start.
+def draw_sidebar : {Int32, Int32}
+  rows, cols = term_size
+  bar_col = [cols / 5, 4].max
+  rows.times { |r| STDOUT.print "\e[#{r + 1};#{bar_col}H│" }
+  STDOUT.flush
+  {bar_col + 2, rows}
+end
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Main greeter loop
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -464,34 +490,53 @@ end
 # The terminal is never left in a broken state; other TTYs remain accessible
 # for recovery in all error paths.
 
-Signal::INT.trap { puts "\n[Ctrl+C — back to login]" }
+Signal::INT.trap { STDOUT.print "\e[8;1H[^C — back to login]\e[9;1H"; STDOUT.flush }
 
 loop do
-  clear_screen
+  # ── clear and draw sidebar ─────────────────────────────────────────────────
+  STDOUT.print "\e[2J\e[H"
+  STDOUT.flush
+  _, rows = draw_sidebar
+  # draw_sidebar returns {bar_col + 2, rows}; recover bar_col to get panel_width.
+  _, cols = term_size
+  bar_col     = [cols / 5, 4].max
+  panel_width = bar_col - 1   # usable columns in the left panel
 
-  puts "\n+----------------------+"
-  puts   "|  WMB  Login Greeter  |"
-  puts   "+----------------------+"
+  # ── header box (scales to panel width) ────────────────────────────────────
+  inner = [panel_width - 2, 1].max
+  title = "WMB Greeter"
+  title = title[0, inner] if title.size > inner
+  pad   = inner - title.size
+  lpad  = pad / 2
+  rpad  = pad - lpad
+  STDOUT.print "\e[1;1H#{"+" + "-" * inner + "+"}"
+  STDOUT.print "\e[2;1H#{"|" + " " * lpad + title + " " * rpad + "|"}"
+  STDOUT.print "\e[3;1H#{"+" + "-" * inner + "+"}"
+  STDOUT.flush
 
   # ── flush stale input before prompting ────────────────────────────────────
   LibC.tcflush(STDIN.fd, LibC::TCIFLUSH)
 
   # ── username ──────────────────────────────────────────────────────────────
-  STDOUT.print "\nlogin: "
+  STDOUT.print "\e[5;1Hlogin: "
   STDOUT.flush
   username = STDIN.gets(chomp: true)
   next if username.nil? || username.strip.empty?
   username = username.strip
 
   # ── password (echo disabled) ──────────────────────────────────────────────
+  STDOUT.print "\e[6;1HPassword: "
+  STDOUT.flush
   password = read_password
-  next if password.empty?   # e.g. empty line or signal-interrupted read
+  next if password.empty?
 
   # ── authenticate via PAM ──────────────────────────────────────────────────
   pamh = authenticate(username, password)
   unless pamh
-    puts "Login incorrect."
-    sleep 2.seconds   # brief delay to slow brute-force attempts
+    msg = "Login incorrect."
+    STDOUT.print "\e[8;1H#{msg[0, panel_width].ljust(panel_width)}"
+    STDOUT.flush
+    sleep 2.seconds
     next
   end
 
@@ -502,14 +547,22 @@ loop do
     next
   end
 
-  puts "Welcome, #{username}."
+  welcome = "Hi, #{username}."
+  STDOUT.print "\e[8;1H#{welcome[0, panel_width].ljust(panel_width)}"
+  STDOUT.flush
 
   # ── session menu ──────────────────────────────────────────────────────────
-  puts "\n  1) Start fvwm3 session"
-  puts   "  2) Exit greeter"
-  puts   "  3) Reboot  [stub]"
-  puts   "  4) Shutdown [stub]"
-  STDOUT.print "\nChoice [1]: "
+  menu = [
+    "1) fvwm3",
+    "2) exit",
+    "3) reboot",
+    "4) shutdown",
+  ]
+  menu.each_with_index do |line, i|
+    STDOUT.print "\e[#{10 + i};1H#{line[0, panel_width].ljust(panel_width)}"
+  end
+  choice_row = 10 + menu.size + 1
+  STDOUT.print "\e[#{choice_row};1HChoice [1]: "
   STDOUT.flush
 
   choice = (STDIN.gets(chomp: true) || "").strip
@@ -517,11 +570,11 @@ loop do
 
   case choice
   when "1"
-    launch_session(pw, pamh)   # launch_session owns pamh; calls pam_close_session + pam_end
-    puts "Returning to login prompt."
+    launch_session(pw, pamh)   # owns pamh; calls pam_close_session + pam_end
   when "2"
     LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
-    puts "Goodbye."
+    STDOUT.print "\e[#{choice_row + 1};1HGoodbye."
+    STDOUT.flush
     exit 0
   when "3"
     LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
@@ -531,6 +584,5 @@ loop do
     do_shutdown
   else
     LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
-    puts "Unknown choice '#{choice}'; back to login."
   end
 end
