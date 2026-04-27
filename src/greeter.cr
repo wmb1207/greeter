@@ -111,6 +111,12 @@ lib LibC
   # chown(2): change ownership of a file.  Called before privilege drop so the
   # user's session can open the virtual console that Xorg needs.
   fun chown(path : Char*, owner : UInt, group : UInt) : Int
+
+  # tcflush(3): discard queued terminal I/O.
+  # TCIFLUSH (0) discards data received but not yet read — used to clear any
+  # stale keystrokes before presenting the login prompt.
+  TCIFLUSH = 0
+  fun tcflush(fd : Int, queue_selector : Int) : Int
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -459,6 +465,9 @@ puts   "|  Crystal TTY Login Greeter  |"
 puts   "+-----------------------------+"
 
 loop do
+  # ── flush stale input before prompting ────────────────────────────────────
+  LibC.tcflush(STDIN.fd, LibC::TCIFLUSH)
+
   # ── username ──────────────────────────────────────────────────────────────
   STDOUT.print "\nlogin: "
   STDOUT.flush
