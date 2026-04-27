@@ -70,6 +70,13 @@ lib LibPAM
   # XDG_SESSION_ID, DBUS_SESSION_BUS_ADDRESS, etc.).  The array itself
   # and each string are malloc-allocated; caller must free them.
   fun pam_getenvlist(pamh : PamHandle) : UInt8**
+  # pam_set_item(3): set a PAM item (e.g. PAM_TTY) before pam_open_session
+  # so pam_systemd registers the session on the correct seat/VT.
+  PAM_TTY = 3
+  fun pam_set_item(pamh : PamHandle, item_type : Int32, item : Void*) : Int32
+  # pam_putenv(3): add a KEY=VALUE string to the PAM environment so
+  # pam_systemd can read XDG_SESSION_TYPE, XDG_SEAT, XDG_VTNR, etc.
+  fun pam_putenv(pamh : PamHandle, name_value : UInt8*) : Int32
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -300,6 +307,20 @@ def launch_session(pw : LibC::Passwd, pamh : LibPAM::PamHandle)
     return
   end
   STDERR.puts "greeter: startx resolved to #{startx_cmd}"
+
+  # Tell pam_systemd which TTY and seat/VT this session belongs to.
+  # These must be set BEFORE pam_open_session so logind registers the
+  # session as Active=yes on seat0/vt1.  Without this polkit refuses
+  # reboot/shutdown with "interactive authentication required".
+  tty_path_str = LibC.ttyname(STDIN.fd)
+  tty_str = tty_path_str.null? ? "/dev/tty1" : String.new(tty_path_str)
+  tty_str.to_unsafe.as(Void*).tap do |ptr|
+    LibPAM.pam_set_item(pamh, LibPAM::PAM_TTY, ptr)
+  end
+  ["XDG_SESSION_TYPE=x11", "XDG_SESSION_CLASS=user",
+   "XDG_SEAT=seat0", "XDG_VTNR=1"].each do |kv|
+    LibPAM.pam_putenv(pamh, kv)
+  end
 
   # Register the session with systemd-logind.  This creates /run/user/<uid>,
   # starts the user's systemd slice (and with it PipeWire/PulseAudio), and
