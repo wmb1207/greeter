@@ -49,6 +49,8 @@
           pkgs.crystal      # compiler + stdlib
           pkgs.shards       # dependency manager (if shards ever get added)
           pkgs.linux-pam    # libpam.so + headers for FFI binding
+          pkgs.crystalline  # Crystal LSP server
+          pkgs.pkg-config   # needed by crystalline to resolve lib flags
         ];
 
         shellHook = ''

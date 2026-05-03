@@ -10,232 +10,10 @@
 # Install: make install   (sets setuid bit)
 
 require "signal"
-require "io/console"   # pulls in LibC::Termios, ECHO, TCSANOW, tcgetattr, tcsetattr
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# LibPAM — FFI bindings for Linux-PAM
-# ═══════════════════════════════════════════════════════════════════════════════
-#
-# Authentication happens in three steps:
-#   1. pam_start       – open a transaction for the "login" service
-#   2. pam_authenticate – verify credentials via the conversation callback
-#   3. pam_acct_mgmt   – confirm the account is valid (not expired/locked)
-#   4. pam_end         – release the transaction (always called)
-#
-# The conversation callback is how PAM asks the application for credentials.
-# When PAM needs a password it calls our function with PAM_PROMPT_ECHO_OFF;
-# we return whatever is in appdata_ptr.  We pass the password through
-# appdata_ptr (a Box'd String) so no global state is needed.
-
-@[Link("pam")]
-lib LibPAM
-  PAM_SUCCESS         =  0
-  PAM_PROMPT_ECHO_OFF =  1   # silent prompt  → password
-  PAM_PROMPT_ECHO_ON  =  2   # visible prompt → other credentials
-  PAM_ERROR_MSG       =  3
-  PAM_TEXT_INFO       =  4
-
-  # One message PAM sends to the application (e.g. "Password: ").
-  struct PamMessage
-    msg_style : Int32
-    msg       : UInt8*
-  end
-
-  # The application's reply to one PamMessage.
-  # `resp` must be malloc-allocated; PAM (or pam_end) will free() it.
-  struct PamResponse
-    resp         : UInt8*
-    resp_retcode : Int32    # unused by Linux-PAM, must be 0
-  end
-
-  # Passed to pam_start.  `conv` is our callback; `appdata_ptr` is
-  # threaded through opaquely so the callback can reach application data.
-  struct PamConv
-    conv        : (Int32, PamMessage**, PamResponse**, Void*) -> Int32
-    appdata_ptr : Void*
-  end
-
-  type PamHandle = Void*
-
-  fun pam_start(service : UInt8*, user : UInt8*,
-                conv : PamConv*, pamh : PamHandle*) : Int32
-  fun pam_authenticate(pamh : PamHandle, flags : Int32) : Int32
-  fun pam_acct_mgmt(pamh : PamHandle, flags : Int32) : Int32
-  fun pam_open_session(pamh : PamHandle, flags : Int32) : Int32
-  fun pam_close_session(pamh : PamHandle, flags : Int32) : Int32
-  fun pam_end(pamh : PamHandle, status : Int32) : Int32
-  fun pam_strerror(pamh : PamHandle, errnum : Int32) : UInt8*
-  # Returns a null-terminated array of "KEY=VALUE" strings representing
-  # all environment variables set by PAM modules (e.g. pam_systemd sets
-  # XDG_SESSION_ID, DBUS_SESSION_BUS_ADDRESS, etc.).  The array itself
-  # and each string are malloc-allocated; caller must free them.
-  fun pam_getenvlist(pamh : PamHandle) : UInt8**
-  # pam_set_item(3): set a PAM item (e.g. PAM_TTY) before pam_open_session
-  # so pam_systemd registers the session on the correct seat/VT.
-  PAM_TTY = 3
-  fun pam_set_item(pamh : PamHandle, item_type : Int32, item : Void*) : Int32
-  # pam_putenv(3): add a KEY=VALUE string to the PAM environment so
-  # pam_systemd can read XDG_SESSION_TYPE, XDG_SEAT, XDG_VTNR, etc.
-  fun pam_putenv(pamh : PamHandle, name_value : UInt8*) : Int32
-end
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# LibC extensions (not present in Crystal's stdlib)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-lib LibC
-  # Crystal's stdlib ships only getpwnam_r; we bind the simpler getpwnam
-  # because this greeter is single-threaded and simplicity matters more.
-  # LibC::Passwd is already defined by the stdlib (pulled in via io/console).
-  fun getpwnam(name : Char*) : Passwd*
-
-  # setuid is in stdlib unistd.cr; setgid is not — declare both for safety.
-  fun setgid(gid : UInt32) : Int
-  fun setuid(uid : UInt32) : Int
-
-  # initgroups(3): initialise the supplementary group access list.
-  # Must be called before setgid/setuid when dropping privileges.
-  fun initgroups(user : Char*, group : UInt32) : Int
-
-  # strdup(3): heap-copy a C string.  PAM will free() the copy.
-  fun strdup(s : Char*) : Char*
-
-  # calloc(3): system allocator — must be used for any memory PAM will free().
-  # Crystal's Pointer(T).malloc uses the Boehm GC allocator, which is
-  # incompatible with libc free() and causes heap corruption.
-  fun calloc(nmemb : SizeT, size : SizeT) : Void*
-
-  # ttyname(3): return the path of the terminal attached to fd (e.g. "/dev/tty1").
-  fun ttyname(fd : Int) : Char*
-
-  # chown(2): change ownership of a file.  Called before privilege drop so the
-  # user's session can open the virtual console that Xorg needs.
-  fun chown(path : Char*, owner : UInt, group : UInt) : Int
-
-  # tcflush(3): discard queued terminal I/O.
-  # TCIFLUSH discards data received but not yet read — used to clear any
-  # stale keystrokes before presenting the login prompt.
-  fun tcflush(fd : Int, queue_selector : Int) : Int
-
-  # TIOCGWINSZ ioctl: query terminal window size.
-  TIOCGWINSZ = 0x5413_u64
-
-  struct Winsize
-    ws_row    : UInt16
-    ws_col    : UInt16
-    ws_xpixel : UInt16
-    ws_ypixel : UInt16
-  end
-
-  fun ioctl(fd : Int, request : ULong, ...) : Int
-end
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAM conversation callback
-# ═══════════════════════════════════════════════════════════════════════════════
-#
-# Defined with `fun` (C calling convention) so Crystal can produce a real
-# C function pointer for it.  Inside a `fun` body all Crystal types and
-# stdlib are available — including Box.
-#
-# On Linux-PAM, `msgs` is PamMessage** — msgs[i] is a PamMessage*.
-# We allocate the response array with malloc; PAM takes ownership and
-# will free() each resp string as well as the array itself.
-
-fun pam_conversation(
-  num_msg   : Int32,
-  msgs      : LibPAM::PamMessage**,
-  resps_out : LibPAM::PamResponse**,
-  appdata   : Void*
-) : Int32
-  password = Box(String).unbox(appdata)
-  # Allocate with the system calloc so PAM can safely free() this array.
-  # Using Crystal's Pointer(T).malloc here would allocate via Boehm GC,
-  # which is incompatible with the libc free() PAM calls on cleanup.
-  resps = LibC.calloc(num_msg.to_u64, sizeof(LibPAM::PamResponse))
-            .as(Pointer(LibPAM::PamResponse))
-
-  num_msg.times do |i|
-    r     = resps + i
-    style = msgs[i].value.msg_style   # msgs[i] → PamMessage*, .value → PamMessage
-
-    if style == LibPAM::PAM_PROMPT_ECHO_OFF || style == LibPAM::PAM_PROMPT_ECHO_ON
-      # Supply the password.  strdup because PAM will free() this string.
-      r.value.resp         = LibC.strdup(password)
-      r.value.resp_retcode = 0
-    else
-      # Info/error message from PAM — no response needed.
-      r.value.resp         = Pointer(UInt8).null
-      r.value.resp_retcode = 0
-    end
-  end
-
-  resps_out.value = resps
-  LibPAM::PAM_SUCCESS
-end
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Terminal helpers
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# Read one line from stdin without echoing characters.
-# The terminal is always restored before returning (even on error/signal).
-def read_password : String
-  fd       = STDIN.fd
-  old_term = LibC::Termios.new
-  LibC.tcgetattr(fd, pointerof(old_term))
-
-  begin
-    silent        = old_term
-    # Clear the ECHO flag to suppress character echo.
-    silent.c_lflag = old_term.c_lflag & ~LibC::ECHO.to_u32
-    LibC.tcsetattr(fd, LibC::TCSANOW, pointerof(silent))
-    STDIN.gets(chomp: true) || ""
-  ensure
-    # Restore original terminal settings unconditionally.
-    LibC.tcsetattr(fd, LibC::TCSANOW, pointerof(old_term))
-  end
-end
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAM authentication
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# Authenticate username + password against the "login" PAM service.
-# Returns the live PamHandle on success so the caller can open a session
-# with it; returns nil on any failure (pam_end is called internally).
-# The password is never written to disk or to any log.
-def authenticate(username : String, password : String) : LibPAM::PamHandle?
-  box = Box.box(password)
-
-  conv             = LibPAM::PamConv.new
-  conv.conv        = ->pam_conversation(Int32, Pointer(Pointer(LibPAM::PamMessage)), Pointer(Pointer(LibPAM::PamResponse)), Pointer(Void))
-  conv.appdata_ptr = box
-
-  pamh = uninitialized LibPAM::PamHandle
-  ret  = LibPAM.pam_start("login", username, pointerof(conv), pointerof(pamh))
-  unless ret == LibPAM::PAM_SUCCESS
-    STDERR.puts "greeter: pam_start failed (#{ret})"
-    return nil
-  end
-
-  # Step 1: verify the supplied credentials.
-  ret = LibPAM.pam_authenticate(pamh, 0)
-  unless ret == LibPAM::PAM_SUCCESS
-    LibPAM.pam_end(pamh, ret)
-    return nil
-  end
-
-  # Step 2: check the account is usable (not expired, not locked, etc.).
-  ret = LibPAM.pam_acct_mgmt(pamh, 0)
-  unless ret == LibPAM::PAM_SUCCESS
-    LibPAM.pam_end(pamh, ret)
-    return nil
-  end
-
-  # Return the live handle — caller must call pam_close_session + pam_end.
-  pamh
-end
+# require "io/console"   # pulls in LibC::Termios, ECHO, TCSANOW, tcgetattr, tcsetattr
+require "./libs"
+require "./auth"
+require "./terminal"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # User lookup
@@ -313,7 +91,9 @@ def launch_session(pw : LibC::Passwd, pamh : LibPAM::PamHandle)
   # Resolve startx to an absolute path by searching session_path directly.
   # Process.find_executable uses the greeter's live PATH (minimal on a TTY/init),
   # so we search the extended session_path we built above instead.
-  startx_cmd = session_path.split(":").map { |d| "#{d}/startx" }.find { |p| File.executable?(p) }
+  startx_cmd = session_path.split(":")
+               .map { |d| "#{d}/startx" }
+               .find { |p| File::Info.executable?(p) }
   if startx_cmd.nil?
     STDERR.puts "greeter: startx not found in session PATH: #{session_path}"
     LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
@@ -387,7 +167,8 @@ def launch_session(pw : LibC::Passwd, pamh : LibPAM::PamHandle)
 
   puts "Starting fvwm3 session for #{user}..."
 
-  child = Process.fork do
+  pid = LibC.fork
+  if pid == 0
     # ── child ──────────────────────────────────────────────────────────────
     # Give the user ownership of the current TTY before dropping privileges.
     # Xorg needs to open the virtual console (e.g. /dev/tty1) as the session
@@ -429,14 +210,22 @@ def launch_session(pw : LibC::Passwd, pamh : LibPAM::PamHandle)
       STDERR.puts "greeter: exec failed: #{ex.message}"
       exit 1
     end
+  elsif pid < 0
+    STDERR.puts "greeter: fork failed"
+    LibPAM.pam_close_session(pamh, 0)
+    LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
+    return
   end
 
   # ── parent — wait for the X session to exit ─────────────────────────────
-  status = child.wait
-  if status.success?
+  raw_status = 0_i32
+  LibC.waitpid(pid, pointerof(raw_status), 0)
+  exited    = (raw_status & 0x7f) == 0
+  exit_code = (raw_status >> 8) & 0xff
+  if exited && exit_code == 0
     puts "Session ended normally."
   else
-    puts "Session exited (code #{status.exit_code})."
+    puts "Session exited (code #{exit_code})."
   end
 
   # Close the PAM session (tears down the systemd-logind session, stops user
@@ -457,31 +246,6 @@ def do_shutdown
   puts "  [stub] shutdown — would exec: systemctl poweroff"
 end
 
-def clear_screen
-  # \e[2J → clear screen
-  # \e[H  → move cursor to top-left
-  STDOUT.print "\e[2J\e[H"
-  STDOUT.flush
-end
-
-# Query the terminal dimensions via TIOCGWINSZ.
-# Falls back to 24x80 if the ioctl fails (e.g. redirected stdio).
-def term_size : {Int32, Int32}
-  ws = LibC::Winsize.new
-  ret = LibC.ioctl(STDOUT.fd, LibC::TIOCGWINSZ, pointerof(ws))
-  (ret == 0 && ws.ws_col > 0) ? {ws.ws_row.to_i, ws.ws_col.to_i} : {24, 80}
-end
-
-# Draw a full-height vertical bar at 20% of the terminal width.
-# Returns {right_col, rows} — right_col is where content should start.
-def draw_sidebar : {Int32, Int32}
-  rows, cols = term_size
-  bar_col = Math.max(cols // 5, 4)
-  rows.times { |r| STDOUT.print "\e[#{r + 1};#{bar_col}H│" }
-  STDOUT.flush
-  {bar_col + 2, rows}
-end
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # Main greeter loop
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -492,97 +256,114 @@ end
 
 Signal::INT.trap { STDOUT.print "\e[8;1H[^C — back to login]\e[9;1H"; STDOUT.flush }
 
-loop do
-  # ── clear and draw sidebar ─────────────────────────────────────────────────
-  STDOUT.print "\e[2J\e[H"
-  STDOUT.flush
-  _, rows = draw_sidebar
-  # draw_sidebar returns {bar_col + 2, rows}; recover bar_col to get panel_width.
-  _, cols = term_size
-  bar_col     = [cols // 5, 4].max
-  panel_width = bar_col - 1   # usable columns in the left panel
+enum Action : UInt8
+  NO_ACTION = 0
+  NEXT_ITER = 1
+end
 
-  # ── header box (scales to panel width) ────────────────────────────────────
-  inner = [panel_width - 2, 1].max
-  title = "WMB Greeter"
-  title = title[0, inner] if title.size > inner
-  pad   = inner - title.size
-  lpad  = pad // 2
-  rpad  = pad - lpad
-  STDOUT.print "\e[1;1H#{"+" + "-" * inner + "+"}"
-  STDOUT.print "\e[2;1H#{"|" + " " * lpad + title + " " * rpad + "|"}"
-  STDOUT.print "\e[3;1H#{"+" + "-" * inner + "+"}"
-  STDOUT.flush
+class Greeter
+
+  def run
+    loop do
+      do_run
+      # case do_run
+      # when Action::NEXT_ITER
+      #   next
+      # end
+    end
+  end
+
+  private def do_run : Action
+    Terminal.clear_screen
+    _, rows = Terminal.draw_sidebar
+    _, cols = Terminal.term_size
+    bar_col     = [cols // 5, 4].max
+    panel_width = bar_col - 1   # usable columns in the left panel
+
+    # ── header box (scales to panel width) ────────────────────────────────────
+    inner = [panel_width - 2, 1].max
+    title = "WMB Greeter"
+    title = title[0, inner] if title.size > inner
+    pad   = inner - title.size
+    lpad  = pad // 2
+    rpad  = pad - lpad
+    STDOUT.print "\e[1;1H#{"+" + "-" * inner + "+"}"
+    STDOUT.print "\e[2;1H#{"|" + " " * lpad + title + " " * rpad + "|"}"
+    STDOUT.print "\e[3;1H#{"+" + "-" * inner + "+"}"
+    STDOUT.flush
 
   # ── flush stale input before prompting ────────────────────────────────────
-  LibC.tcflush(STDIN.fd, LibC::TCIFLUSH)
+    LibC.tcflush(STDIN.fd, LibC::TCIFLUSH)
 
-  # ── username ──────────────────────────────────────────────────────────────
-  STDOUT.print "\e[5;1Hlogin: "
-  STDOUT.flush
-  username = STDIN.gets(chomp: true)
-  next if username.nil? || username.strip.empty?
-  username = username.strip
+    creds_result = Terminal.read_auth_inputs
+    return Action::NEXT_ITER unless creds_result.is_ok?
 
-  # ── password (echo disabled) ──────────────────────────────────────────────
-  STDOUT.print "\e[6;1HPassword: "
-  STDOUT.flush
-  password = read_password
-  next if password.empty?
+    username, password = creds_result.value.not_nil!
+    authenticated_result = Auth.auth(Auth::Credentials.new(
+                                      username: username,
+                                      password: password
+                                    ))
 
-  # ── authenticate via PAM ──────────────────────────────────────────────────
-  pamh = authenticate(username, password)
-  unless pamh
-    msg = "Login incorrect."
-    STDOUT.print "\e[8;1H#{msg[0, panel_width].ljust(panel_width)}"
+    if !authenticated_result.is_ok?
+      msg = authenticated_result.error.not_nil!
+      STDOUT.print "\e[8;1H#{msg[0, panel_width].ljust(panel_width)}"
+      STDOUT.flush
+      sleep 2.seconds
+      return Action::NEXT_ITER
+    end
+
+    authenticated = authenticated_result.value.not_nil!
+
+    welcome = "Hi, #{authenticated.username}."
+    STDOUT.print "\e[8;1H#{welcome[0, panel_width].ljust(panel_width)}"
     STDOUT.flush
-    sleep 2.seconds
-    next
+
+    menu panel_width, authenticated
   end
 
-  pw = find_user(username)
-  unless pw
-    STDERR.puts "greeter: no passwd entry for '#{username}'"
-    LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
-    next
-  end
-
-  welcome = "Hi, #{username}."
-  STDOUT.print "\e[8;1H#{welcome[0, panel_width].ljust(panel_width)}"
-  STDOUT.flush
-
-  # ── session menu ──────────────────────────────────────────────────────────
-  menu = [
-    "1) fvwm3",
-    "2) exit",
-    "3) reboot",
-    "4) shutdown",
-  ]
-  menu.each_with_index do |line, i|
-    STDOUT.print "\e[#{10 + i};1H#{line[0, panel_width].ljust(panel_width)}"
-  end
-  choice_row = 10 + menu.size + 1
-  STDOUT.print "\e[#{choice_row};1HChoice [1]: "
-  STDOUT.flush
-
-  choice = (STDIN.gets(chomp: true) || "").strip
-  choice = "1" if choice.empty?
-
-  case choice
-  when "1"
-    launch_session(pw, pamh)   # owns pamh; calls pam_close_session + pam_end
-  when "2"
-    LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
-    STDOUT.print "\e[#{choice_row + 1};1HGoodbye."
+  private def menu(panel_width : Int , authenticated : Auth::LoginSession)
+    # ── session menu ──────────────────────────────────────────────────────────
+    menu = [
+      "1) fvwm3",
+      "2) exit",
+      "3) reboot",
+      "4) shutdown",
+    ]
+    menu.each_with_index do |line, i|
+      STDOUT.print "\e[#{10 + i};1H#{line[0, panel_width].ljust(panel_width)}"
+    end
+    choice_row = 10 + menu.size + 1
+    STDOUT.print "\e[#{choice_row};1HChoice [1]: "
     STDOUT.flush
-    exit 0
-  when "3"
-    LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
-    do_reboot
-  when "4"
-    LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
-    do_shutdown
-  else
-    LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
+    
+    choice = (STDIN.gets(chomp: true) || "").strip
+    choice = "1" if choice.empty?
+    
+    case choice
+    when "1"
+      launch_session(authenticated.pw, authenticated.pamh)   # owns pamh; calls pam_close_session + pam_end
+    when "2"
+      LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
+      STDOUT.print "\e[#{choice_row + 1};1HGoodbye."
+      STDOUT.flush
+      exit 0
+    when "3"
+      LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
+      do_reboot
+    when "4"
+      LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
+      do_shutdown
+    else
+      LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
+    end
+
+    Action::NO_ACTION
   end
 end
+
+def main
+  greeter = Greeter.new
+  greeter.run
+end
+
+main

@@ -2,3 +2,5 @@ greeter
 result
 .shards/
 lib/
+*~
+\#*\#
