@@ -235,6 +235,71 @@ def launch_session(pw : LibC::Passwd, pamh : LibPAM::PamHandle)
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# SSH session launch
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def launch_ssh(pw : LibC::Passwd, host : String)
+  user  = String.new(pw.pw_name)
+  home  = String.new(pw.pw_dir)
+  shell = String.new(pw.pw_shell)
+
+  session_path = [
+    "#{home}/.local/bin",
+    "#{home}/.nix-profile/bin",
+    "/run/current-system/sw/bin",
+    "/nix/var/nix/profiles/default/bin",
+    "/run/wrappers/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+  ].join(":")
+
+  ssh_cmd = session_path.split(":")
+              .map { |d| "#{d}/ssh" }
+              .find { |p| File::Info.executable?(p) }
+  if ssh_cmd.nil?
+    STDERR.puts "greeter: ssh not found in PATH"
+    return
+  end
+
+  puts "Connecting to #{host}..."
+
+  pid = LibC.fork
+  if pid == 0
+    unless drop_privileges(pw)
+      STDERR.puts "greeter: privilege drop failed; ssh aborted"
+      exit 1
+    end
+    Dir.cd(home)
+    begin
+      Process.exec(
+        command:   ssh_cmd,
+        args:      ["-l", user, host],
+        env:       {
+          "HOME"  => home,
+          "USER"  => user,
+          "SHELL" => shell,
+          "PATH"  => session_path,
+          "TERM"  => ENV["TERM"]? || "linux",
+        },
+        clear_env: true
+      )
+    rescue ex
+      STDERR.puts "greeter: exec ssh failed: #{ex.message}"
+      exit 1
+    end
+  elsif pid < 0
+    STDERR.puts "greeter: fork failed"
+    return
+  end
+
+  raw_status = 0_i32
+  LibC.waitpid(pid, pointerof(raw_status), 0)
+  puts "SSH session ended."
+  sleep 1.second
+end
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Stub menu actions (bonus)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -328,6 +393,7 @@ class Greeter
       "2) exit",
       "3) reboot",
       "4) shutdown",
+      "5) ssh desktop.wmb.arpa",
     ]
     menu.each_with_index do |line, i|
       STDOUT.print "\e[#{10 + i};1H#{line[0, panel_width].ljust(panel_width)}"
@@ -353,6 +419,9 @@ class Greeter
     when "4"
       LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
       do_shutdown
+    when "5"
+      LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
+      launch_ssh(authenticated.pw, "desktop.wmb.arpa")
     else
       LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
     end
