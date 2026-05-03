@@ -300,6 +300,130 @@ def launch_ssh(pw : LibC::Passwd, host : String)
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Moonlight streaming session
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Runs moonlight-qt directly on the KMS/DRM framebuffer (SDL_VIDEODRIVER=kmsdrm)
+# — no X server needed.  PAM session is still opened so logind registers the
+# session and creates /run/user/<uid> (needed for PipeWire audio).
+
+def launch_moonlight(pw : LibC::Passwd, pamh : LibPAM::PamHandle, host : String)
+  user  = String.new(pw.pw_name)
+  home  = String.new(pw.pw_dir)
+  shell = String.new(pw.pw_shell)
+
+  session_path = [
+    "#{home}/.local/bin",
+    "#{home}/.nix-profile/bin",
+    "/nix/var/nix/profiles/per-user/#{user}/bin",
+    "/run/current-system/sw/bin",
+    "/nix/var/nix/profiles/default/bin",
+    "/run/wrappers/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+  ].join(":")
+
+  moonlight_cmd = session_path.split(":")
+                   .flat_map { |d| ["#{d}/moonlight", "#{d}/moonlight-qt"] }
+                   .find { |p| File::Info.executable?(p) }
+  if moonlight_cmd.nil?
+    STDERR.puts "greeter: moonlight / moonlight-qt not found in PATH"
+    LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
+    return
+  end
+  STDERR.puts "greeter: moonlight resolved to #{moonlight_cmd}"
+
+  tty_path_str = LibC.ttyname(STDIN.fd)
+  tty_str = tty_path_str.null? ? "/dev/tty1" : String.new(tty_path_str)
+  tty_str.to_unsafe.as(Void*).tap do |ptr|
+    LibPAM.pam_set_item(pamh, LibPAM::PAM_TTY, ptr)
+  end
+  ["XDG_SESSION_TYPE=x11", "XDG_SESSION_CLASS=user",
+   "XDG_SEAT=seat0", "XDG_VTNR=1"].each do |kv|
+    LibPAM.pam_putenv(pamh, kv)
+  end
+
+  ret = LibPAM.pam_open_session(pamh, 0)
+  if ret != LibPAM::PAM_SUCCESS
+    STDERR.puts "greeter: pam_open_session failed (#{ret})"
+  end
+
+  pam_env = {} of String => String
+  envlist = LibPAM.pam_getenvlist(pamh)
+  unless envlist.null?
+    i = 0
+    while !(ptr = envlist[i]).null?
+      pair = String.new(ptr)
+      eq   = pair.index('=')
+      pam_env[pair[0...eq]] = pair[(eq + 1)..] if eq
+      i += 1
+    end
+  end
+
+  env = {
+    "HOME"             => home,
+    "USER"             => user,
+    "SHELL"            => shell,
+    "LOGNAME"          => user,
+    "PATH"             => session_path,
+    "XDG_RUNTIME_DIR"  => "/run/user/#{pw.pw_uid}",
+    "XDG_SESSION_TYPE" => "x11",
+    "XDG_SEAT"         => "seat0",
+    "XDG_VTNR"         => "1",
+    # Tell SDL2 to render directly to the KMS/DRM framebuffer — no X needed.
+    "SDL_VIDEODRIVER"  => "kmsdrm",
+  }
+  pam_env.each { |k, v| env[k] ||= v }
+
+  puts "Connecting to #{host} via Moonlight..."
+
+  pid = LibC.fork
+  if pid == 0
+    tty_path = LibC.ttyname(STDIN.fd)
+    unless tty_path.null?
+      LibC.chown(tty_path, pw.pw_uid, pw.pw_gid)
+    end
+
+    unless drop_privileges(pw)
+      STDERR.puts "greeter: privilege drop failed; moonlight aborted"
+      exit 1
+    end
+    Dir.cd(home)
+
+    begin
+      Process.exec(
+        command:   moonlight_cmd,
+        args:      ["stream", host, "Desktop"],
+        env:       env,
+        clear_env: true
+      )
+    rescue ex
+      STDERR.puts "greeter: exec moonlight failed: #{ex.message}"
+      exit 1
+    end
+  elsif pid < 0
+    STDERR.puts "greeter: fork failed"
+    LibPAM.pam_close_session(pamh, 0)
+    LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
+    return
+  end
+
+  raw_status = 0_i32
+  LibC.waitpid(pid, pointerof(raw_status), 0)
+  exited    = (raw_status & 0x7f) == 0
+  exit_code = (raw_status >> 8) & 0xff
+  if exited && exit_code == 0
+    puts "Moonlight session ended normally."
+  else
+    puts "Moonlight session exited (code #{exit_code})."
+  end
+
+  LibPAM.pam_close_session(pamh, 0)
+  LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
+end
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Stub menu actions (bonus)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -394,6 +518,7 @@ class Greeter
       "3) reboot",
       "4) shutdown",
       "5) ssh desktop.wmb.arpa",
+      "6) moonlight desktop.wmb.arpa",
     ]
     menu.each_with_index do |line, i|
       STDOUT.print "\e[#{10 + i};1H#{line[0, panel_width].ljust(panel_width)}"
@@ -422,6 +547,8 @@ class Greeter
     when "5"
       LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
       launch_ssh(authenticated.pw, "desktop.wmb.arpa")
+    when "6"
+      launch_moonlight(authenticated.pw, authenticated.pamh, "desktop.wmb.arpa")
     else
       LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
     end
