@@ -1,0 +1,245 @@
+require "./result"
+require "./libs"
+require "./action"
+
+module Sessions
+  TTY1 = "/dev/tty1"
+
+  alias ActionResult = Result(Action)
+  alias BooleanResult = Result(Bool)
+
+  def self.session_path(home : String) : String
+    [
+      "#{home}/.local/bin",
+      "#{home}/.nix-profile/bin",
+      "/run/current-system/sw/bin",
+      "/nix/var/nix/profiles/default/bin",
+      "/run/wrappers/bin",
+      "/usr/local/bin",
+      "/usr/bin",
+      "/bin",
+    ].join(":")
+  end
+
+  def self.close_pam_session(pamh : LibPAM::PamHandle)
+    # Close the PAM session (tears down the systemd-logind session, stops user
+    # services) then end the transaction.
+    LibPAM.pam_close_session(pamh, 0)
+    LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
+  end
+
+  def self.env_vars(pamh : LibPAM::PamHandle, pw : LibC::Passwd)
+    user = String.new(pw.pw_name)
+    home = String.new(pw.pw_dir)
+    shell = String.new(pw.pw_shell)
+
+    env = {
+      "HOME"    => home,
+      "USER"    => user,
+      "SHELL"   => shell,
+      "LOGNAME" => user,
+      "PATH"    => session_path(home),
+      "ENV"     => "#{home}/.kshrc",
+      # Required by PipeWire / PulseAudio to locate their socket.
+      # pam_open_session (via pam_systemd) creates this directory;
+      # we set it explicitly so the child always has the right value.
+      "XDG_RUNTIME_DIR" => "/run/user/#{pw.pw_uid}",
+      # Tells systemd-logind / D-Bus what kind of session this is.
+      "XDG_SESSION_TYPE"  => "x11",
+      "XDG_SESSION_CLASS" => "user",
+      "XDG_SEAT"          => "seat0",
+      "XDG_VTNR"          => "1",
+    }
+
+    with_pam_env(env, pamh)
+  end
+
+  private def self.with_pam_env(base : Hash(String, String), pamh : LibPAM::PamHandle) : Hash(String, String)
+    merged = base.dup
+    env_vars_from_pam(pamh) { |k, v| merged[k] ||= v }
+    merged
+  end
+
+  def self.launch_session(pw : LibC::Passwd, pamh : LibPAM::PamHandle) : ActionResult
+    local_env_vars = env_vars(pamh, pw)
+    # Build a PATH for the child session.
+    # On NixOS, tools like uname/expr/hexdump may only exist in nix store paths
+    # not exposed via /run/current-system/sw/bin.  Find coreutils and util-linux
+    # directly in /nix/store so startx can locate them regardless of profile state.
+    nix_extra = [] of String
+    ["coreutils", "util-linux", "xinit"].each do |pkg|
+      Dir.glob("/nix/store/*-#{pkg}-*/bin").each { |d| nix_extra << d }
+    end
+
+    greeter_path = (ENV["PATH"]? || "").split(":").reject(&.empty?)
+    local_session_path = (greeter_path + nix_extra + session_path(local_env_vars["HOME"]).split(":").reject(&.empty?)).uniq.join(":")
+
+    startx_cmd = local_session_path.split(":")
+      .map { |d| "#{d}/startx" }
+      .find { |p| File::Info.executable?(p) }
+
+    return ActionResult.error("Greeter: startx command not found in session PATH: #{local_session_path}") if startx_cmd.nil?
+    # This has to be done outside of this
+    # STDERR.puts "greeter: startx not found in session PATH: #{session_path}"
+    # LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
+    # return
+
+    # Tell pam_systemd which TTY and seat/VT this session belongs to.
+    # These must be set BEFORE pam_open_session so logind registers the
+    # session as Active=yes on seat0/vt1.  Without this polkit refuses
+    # reboot/shutdown with "interactive authentication required".
+    tty_path_str = LibC.ttyname(STDIN.fd)
+    tty_str = tty_path_str.null? ? TTY1 : String.new(tty_path_str)
+    tty_str.to_unsafe.as(Void*).tap do |ptr|
+      LibPAM.pam_set_item(pamh, LibPAM::PAM_TTY, ptr)
+    end
+    ["XDG_SESSION_TYPE=x11", "XDG_SESSION_CLASS=user",
+     "XDG_SEAT=seat0", "XDG_VTNR=1"].each do |kv|
+      LibPAM.pam_putenv(pamh, kv)
+    end
+
+    # Register the session with systemd-logind.  This creates /run/user/<uid>,
+    # starts the user's systemd slice (and with it PipeWire/PulseAudio), and
+    # sets up the PAM environment for the session.  Without this call there is
+    # no audio because the audio server never starts.
+    ret = LibPAM.pam_open_session(pamh, 0)
+    return ActionResult.error("Greeter: pam_open_session failed (#{ret}) — audio may be unavailable") if ret != LibPAM::PAM_SUCCESS
+
+    puts "Starting fvwm3 session for #{local_env_vars["USER"]}..."
+
+    pid = LibC.fork
+    if pid == 0
+      sessionResult = do_start_session(pw, env_vars(pamh, pw), startx_cmd)
+      return sessionResult if sessionResult.is_error?
+    elsif pid < 0
+      LibPAM.pam_close_session(pamh, 0)
+      LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
+      return ActionResult.new(value: Action::NO_ACTION, error: "Greeter: fork failed")
+    end
+
+    # ── parent — wait for the X session to exit ─────────────────────────────
+    raw_status = 0_i32
+    LibC.waitpid(pid, pointerof(raw_status), 0)
+    exited = (raw_status & 0x7f) == 0
+    exit_code = (raw_status >> 8) & 0xff
+    if exited && exit_code == 0
+      puts "Session ended normally."
+    else
+      puts "Session exited (code #{exit_code})."
+    end
+
+    close_pam_session(pamh)
+    ActionResult.ok(Action::NO_ACTION)
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # SSH session launch
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  def self.launch_ssh(pw : LibC::Passwd, pamh : LibPAM::PamHandle, host : String) : ActionResult
+    local_env_vars = env_vars(pamh, pw)
+    ssh_cmd = session_path(local_env_vars["HOME"]).split(":")
+      .map { |d| "#{d}/ssh" }
+      .find { |p| File::Info.executable?(p) }
+
+    if ssh_cmd.nil?
+      return ActionResult.new(
+        value: Action::EXIT_CODE_1,
+        error: "Greeter: ssh not found in path"
+      )
+    end
+
+    puts "Connecting to #{host}..."
+
+    pid = LibC.fork
+    if pid == 0
+      ssh_session = do_start_ssh_session(pw, local_env_vars, ssh_cmd, host)
+      return ssh_session if ssh_session
+    elsif pid < 0
+      return ActionResult.new(value: Action::NO_ACTION, error: "Greeter: fork failed")
+    end
+
+    raw_status = 0_i32
+    LibC.waitpid(pid, pointerof(raw_status), 0)
+    puts "SSH session ended."
+    sleep 1.second
+  end
+
+  private def self.do_start_ssh_session(pw : LibC::Passwd, env : Hash(String, String), ssh_cmd : String, host : String) : ActionResult
+    return ActionResult.new(value: Action::EXIT_CODE_1, error: "Greeter: Privilege drop pfailed; session aborted") if drop_privileges(pw).is_error?
+    Dir.cd(env["HOME"])
+    sshResult = ssh(env, ssh_cmd, env["USER"], host)
+    return fvwmResult if fvwmResult.is_error?
+    ActionResult.ok(Action::NO_ACTION)
+  end
+
+  private def self.drop_privileges(pw : LibC::Passwd) : BooleanResult
+    return BooleanResult.new(value: false, error: "Greeter: initgroups failed") if LibC.initgroups(pw.pw_name, pw.pw_gid) != 0
+    return BooleanResult.new(value: false, error: "Greeter: setgid(#{pw.pw_gid}) failed") if LibC.setgid(pw.pw_gid) != 0
+    return BooleanResult.new(value: false, error: "Greeter: setuid(#{pw.pw_uid}) failed") if LibC.setuid(pw.pw_uid) != 0
+    BooleanResult.ok(true)
+  end
+
+  private def self.do_start_session(pw : LibC::Passwd, env : Hash(String, String), startx_cmd : String) : ActionResult
+    tty_path = LibC.ttyname(STDIN.fd)
+    unless tty_path.null?
+      LibC.chown(tty_path, pw.pw_uid, pw.pw_gid)
+    end
+
+    return ActionResult.new(value: Action::EXIT_CODE_1, error: "Greeter: Privilege drop pfailed; session aborted") if drop_privileges(pw).is_error?
+    Dir.cd(env["HOME"])
+    fvwmResult = fvwm(env, startx_cmd)
+    return fvwmResult if fvwmResult.is_error?
+    ActionResult.ok(Action::NO_ACTION)
+  end
+
+  def self.fvwm(env : Hash(String, String), startx_cmd : String) : ActionResult
+    begin
+      Process.exec(
+        command: env["SHELL"],
+        args: ["-l", "-c", "exec \"$@\"", "--",
+               "systemd-run", "--user", "--scope", "--collect",
+               "--", startx_cmd, "fvwm3", "--", ":0", "vt1"],
+        env: env,
+        clear_env: true
+      )
+      ActionResult.ok(Action::NO_ACTION)
+    rescue ex
+      ActionResult.new(Action::EXIT_CODE_1, error: "Greeter: exec failed: #{ex.message}")
+    end
+  end
+
+  def self.ssh(env : Hash(String, String), ssh_cmd : String, user : String, host : String) : ActionResult
+    begin
+      Process.exec(
+        command: ssh_cmd,
+        args: ["-l", user, host],
+        env: {
+          "HOME"  => env["HOME"],
+          "USER"  => env["USER"],
+          "SHELL" => env["SHELL"],
+          "PATH"  => session_path(env["HOME"]),
+          "TERM"  => ENV["TERM"]? || "linux",
+        },
+        clear_env: true
+      )
+    rescue ex
+      ActionResult.new(Action::EXIT_CODE_1, error: "Greeter: exec failed: #{ex.message}")
+    end
+  end
+
+  private def self.env_vars_from_pam(pamh : LibPAM::PamHandle, & : String, String ->)
+    raw_env_list = LibPAM.pam_getenvlist(pamh)
+    # Return if it's null
+    return {} of String => String if raw_env_list.null?
+
+    i = 0
+    while !(ptr = raw_env_list[i]).null?
+      pair = String.new(ptr)
+      if eq = pair.index('=')
+        yield pair[0...eq], pair[(eq + 1)..]
+      end
+      i += 1
+    end
+  end
+end

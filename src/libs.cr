@@ -1,7 +1,6 @@
 require "signal"
 require "io/console"
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # LibPAM — FFI bindings for Linux-PAM
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -19,29 +18,29 @@ require "io/console"
 
 @[Link("pam")]
 lib LibPAM
-  PAM_SUCCESS         =  0
-  PAM_PROMPT_ECHO_OFF =  1   # silent prompt  → password
-  PAM_PROMPT_ECHO_ON  =  2   # visible prompt → other credentials
-  PAM_ERROR_MSG       =  3
-  PAM_TEXT_INFO       =  4
+  PAM_SUCCESS         = 0
+  PAM_PROMPT_ECHO_OFF = 1 # silent prompt  → password
+  PAM_PROMPT_ECHO_ON  = 2 # visible prompt → other credentials
+  PAM_ERROR_MSG       = 3
+  PAM_TEXT_INFO       = 4
 
   # One message PAM sends to the application (e.g. "Password: ").
   struct PamMessage
     msg_style : Int32
-    msg       : UInt8*
+    msg : UInt8*
   end
 
   # The application's reply to one PamMessage.
   # `resp` must be malloc-allocated; PAM (or pam_end) will free() it.
   struct PamResponse
-    resp         : UInt8*
-    resp_retcode : Int32    # unused by Linux-PAM, must be 0
+    resp : UInt8*
+    resp_retcode : Int32 # unused by Linux-PAM, must be 0
   end
 
   # Passed to pam_start.  `conv` is our callback; `appdata_ptr` is
   # threaded through opaquely so the callback can reach application data.
   struct PamConv
-    conv        : (Int32, PamMessage**, PamResponse**, Void*) -> Int32
+    conv : (Int32, PamMessage**, PamResponse**, Void*) -> Int32
     appdata_ptr : Void*
   end
 
@@ -111,8 +110,8 @@ lib LibC
   TIOCGWINSZ = 0x5413_u64
 
   struct Winsize
-    ws_row    : UInt16
-    ws_col    : UInt16
+    ws_row : UInt16
+    ws_col : UInt16
     ws_xpixel : UInt16
     ws_ypixel : UInt16
   end
@@ -141,29 +140,29 @@ end
 # will free() each resp string as well as the array itself.
 
 fun pam_conversation(
-  num_msg   : Int32,
-  msgs      : LibPAM::PamMessage**,
+  num_msg : Int32,
+  msgs : LibPAM::PamMessage**,
   resps_out : LibPAM::PamResponse**,
-  appdata   : Void*
+  appdata : Void*,
 ) : Int32
   password = Box(String).unbox(appdata)
   # Allocate with the system calloc so PAM can safely free() this array.
   # Using Crystal's Pointer(T).malloc here would allocate via Boehm GC,
   # which is incompatible with the libc free() PAM calls on cleanup.
   resps = LibC.calloc(num_msg.to_u64, sizeof(LibPAM::PamResponse))
-            .as(Pointer(LibPAM::PamResponse))
+    .as(Pointer(LibPAM::PamResponse))
 
   num_msg.times do |i|
-    r     = resps + i
-    style = msgs[i].value.msg_style   # msgs[i] → PamMessage*, .value → PamMessage
+    r = resps + i
+    style = msgs[i].value.msg_style # msgs[i] → PamMessage*, .value → PamMessage
 
     if style == LibPAM::PAM_PROMPT_ECHO_OFF || style == LibPAM::PAM_PROMPT_ECHO_ON
       # Supply the password.  strdup because PAM will free() this string.
-      r.value.resp         = LibC.strdup(password)
+      r.value.resp = LibC.strdup(password)
       r.value.resp_retcode = 0
     else
       # Info/error message from PAM — no response needed.
-      r.value.resp         = Pointer(UInt8).null
+      r.value.resp = Pointer(UInt8).null
       r.value.resp_retcode = 0
     end
   end

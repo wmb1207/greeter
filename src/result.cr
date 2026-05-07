@@ -9,6 +9,10 @@ struct Result(T)
     !error
   end
 
+  def is_error?
+    !is_ok?
+  end
+
   def self.ok(value : T) : Result
     new(value: value, error: nil)
   end

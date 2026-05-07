@@ -2,13 +2,12 @@ require "./result"
 require "./libs"
 
 module Auth
-
   struct LoginSession
     getter username : String
     getter pw : LibC::Passwd
     getter pamh : LibPAM::PamHandle
 
-    def initialize (@username : String, @pw : LibC::Passwd, @pamh : LibPAM::PamHandle)
+    def initialize(@username : String, @pw : LibC::Passwd, @pamh : LibPAM::PamHandle)
     end
   end
 
@@ -21,6 +20,7 @@ module Auth
   end
 
   alias LoginSessionResult = Result(LoginSession)
+
   def self.auth(creds : Credentials) : LoginSessionResult
     pamh = do_auth(creds.username, creds.password)
     return LoginSessionResult.error("Login incorrect.") unless pamh
@@ -29,10 +29,10 @@ module Auth
     return LoginSessionResult.error("Greeter: No passwd entry for '#{creds.username}'") unless pw
 
     LoginSessionResult.ok(LoginSession.new(
-                          username: creds.username,
-                          pw: pw,
-                          pamh: pamh
-                        ))
+      username: creds.username,
+      pw: pw,
+      pamh: pamh
+    ))
   end
 
   # ═══════════════════════════════════════════════════════════════════════════════
@@ -44,11 +44,11 @@ module Auth
   # The password is never written to disk or to any log.
   private def self.do_auth(username : String, password : String) : LibPAM::PamHandle?
     box = Box.box(password)
-    conv             = LibPAM::PamConv.new
-    conv.conv        = ->pam_conversation(Int32, Pointer(Pointer(LibPAM::PamMessage)), Pointer(Pointer(LibPAM::PamResponse)), Pointer(Void))
+    conv = LibPAM::PamConv.new
+    conv.conv = ->pam_conversation(Int32, Pointer(Pointer(LibPAM::PamMessage)), Pointer(Pointer(LibPAM::PamResponse)), Pointer(Void))
     conv.appdata_ptr = box
     pamh = uninitialized LibPAM::PamHandle
-    ret  = LibPAM.pam_start("login", username, pointerof(conv), pointerof(pamh))
+    ret = LibPAM.pam_start("login", username, pointerof(conv), pointerof(pamh))
     unless ret == LibPAM::PAM_SUCCESS
       STDERR.puts "greeter: pam_start failed (#{ret})"
       return nil
@@ -71,5 +71,4 @@ module Auth
     # Return the live handle — caller must call pam_close_session + pam_end.
     pamh
   end
-
 end
