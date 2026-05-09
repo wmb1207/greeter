@@ -4,3 +4,6 @@ result
 lib/
 *~
 \#*\#
+*.qcow2
+*.elc
+.#*

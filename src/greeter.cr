@@ -269,53 +269,70 @@ class Greeter
 
   private def menu(panel_width : Int, authenticated : Auth::LoginSession)
     # ── session menu ──────────────────────────────────────────────────────────
-    menu = [
-      "1) fvwm3",
-      "2) exit",
-      "3) reboot",
-      "4) shutdown",
-      "5) ssh desktop.wmb.arpa",
-      "6) moonlight desktop.wmb.arpa",
+    wm_sessions = Sessions.available_sessions
+
+    static_entries = [
+      "exit",
+      "reboot",
+      "shutdown",
+      "ssh",
+      "moonlight desktop.wmb.arpa",
     ]
-    menu.each_with_index do |line, i|
+
+    all_entries = wm_sessions.map(&.name) + static_entries
+    all_entries.each_with_index do |label, i|
+      line = "#{i + 1}) #{label}"
       STDOUT.print "\e[#{10 + i};1H#{line[0, panel_width].ljust(panel_width)}"
     end
-    choice_row = 10 + menu.size + 1
-    STDOUT.print "\e[#{choice_row};1HChoice [1]: "
+
+    default = wm_sessions.empty? ? "" : "1"
+    choice_row = 10 + all_entries.size + 1
+    STDOUT.print "\e[#{choice_row};1HChoice [#{default}]: "
     STDOUT.flush
 
     choice = (STDIN.gets(chomp: true) || "").strip
-    choice = "1" if choice.empty?
+    choice = default if choice.empty?
 
-    case choice
-    when "1"
-      session = Sessions.launch_session(authenticated.pw, authenticated.pamh) # owns pamh; calls pam_close_session + pam_end
+    idx = (choice.to_i? || 0) - 1
+    wm_count = wm_sessions.size
+
+    if idx >= 0 && idx < wm_count
+      session = Sessions.launch_session(authenticated.pw, authenticated.pamh, wm_sessions[idx].exec)
       unless session.is_ok?
         STDERR.puts session.error
         LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
       end
-    when "2"
-      LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
-      STDOUT.print "\e[#{choice_row + 1};1HGoodbye."
-      STDOUT.flush
-      exit 0
-    when "3"
-      LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
-      do_reboot
-    when "4"
-      LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
-      do_shutdown
-    when "5"
-      LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
-      session = Sessions.launch_ssh(authenticated.pw, authenticated.pamh, "desktop.wmb.arpa")
-      unless session.is_ok?
-        STDERR.puts session.error
-        LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
-      end
-    when "6"
-      launch_moonlight(authenticated.pw, authenticated.pamh, "desktop.wmb.arpa")
     else
-      LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
+      case idx - wm_count
+      when 0 # exit
+        LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
+        STDOUT.print "\e[#{choice_row + 1};1HGoodbye."
+        STDOUT.flush
+        exit 0
+      when 1 # reboot
+        LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
+        do_reboot
+      when 2 # shutdown
+        LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
+        do_shutdown
+      when 3 # ssh
+        STDOUT.print "\e[#{choice_row + 1};1HHost: "
+        STDOUT.flush
+        host = (STDIN.gets(chomp: true) || "").strip
+        if host.empty?
+          LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
+        else
+          session = Sessions.launch_ssh(authenticated.pw, authenticated.pamh, host)
+          unless session.is_ok?
+            STDERR.puts session.error
+            LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
+          end
+        end
+      when 4 # moonlight
+        launch_moonlight(authenticated.pw, authenticated.pamh, "desktop.wmb.arpa")
+      else
+        LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
+      end
     end
 
     Action::NO_ACTION
