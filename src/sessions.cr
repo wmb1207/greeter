@@ -8,6 +8,62 @@ module Sessions
   alias ActionResult = Result(Action)
   alias BooleanResult = Result(Bool)
 
+  struct XSession
+    getter name : String
+    getter exec : String
+
+    def initialize(@name, @exec)
+    end
+  end
+
+  XSESSION_DIRS = [
+    "/usr/share/xsessions",
+    "/run/current-system/sw/share/xsessions",
+  ]
+
+  def self.available_sessions : Array(XSession)
+    sessions = [] of XSession
+    seen = Set(String).new
+
+    XSESSION_DIRS.each do |dir|
+      Dir.glob("#{dir}/*.desktop").sort.each do |path|
+        next if seen.includes?(path)
+        seen.add(path)
+        s = parse_desktop_file(path)
+        sessions << s if s
+      end
+    end
+
+    sessions.sort_by(&.name)
+  end
+
+  private def self.parse_desktop_file(path : String) : XSession?
+    name = nil
+    exec_val = nil
+    in_entry = false
+
+    File.each_line(path) do |line|
+      line = line.strip
+      if line == "[Desktop Entry]"
+        in_entry = true
+      elsif line.starts_with?('[')
+        in_entry = false
+      elsif in_entry
+        if line.starts_with?("Name=") && name.nil?
+          name = line[5..]
+        elsif line.starts_with?("Exec=") && exec_val.nil?
+          # Strip .desktop field codes (%F, %u, etc.) — unused in session files
+          exec_val = line[5..].gsub(/%[A-Za-z]/, "").strip
+        end
+      end
+    end
+
+    return nil unless name && exec_val
+    XSession.new(name.not_nil!, exec_val.not_nil!)
+  rescue
+    nil
+  end
+
   def self.session_path(home : String) : String
     [
       "#{home}/.local/bin",
@@ -60,7 +116,7 @@ module Sessions
     merged
   end
 
-  def self.launch_session(pw : LibC::Passwd, pamh : LibPAM::PamHandle) : ActionResult
+  def self.launch_session(pw : LibC::Passwd, pamh : LibPAM::PamHandle, wm_exec : String) : ActionResult
     local_env_vars = env_vars(pamh, pw)
     # Build a PATH for the child session.
     # On NixOS, tools like uname/expr/hexdump may only exist in nix store paths
@@ -105,11 +161,11 @@ module Sessions
     ret = LibPAM.pam_open_session(pamh, 0)
     return ActionResult.error("Greeter: pam_open_session failed (#{ret}) — audio may be unavailable") if ret != LibPAM::PAM_SUCCESS
 
-    puts "Starting fvwm3 session for #{local_env_vars["USER"]}..."
+    puts "Starting #{wm_exec.split.first} session for #{local_env_vars["USER"]}..."
 
     pid = LibC.fork
     if pid == 0
-      sessionResult = do_start_session(pw, env_vars(pamh, pw), startx_cmd)
+      sessionResult = do_start_session(pw, env_vars(pamh, pw), startx_cmd, wm_exec)
       return sessionResult if sessionResult.is_error?
     elsif pid < 0
       LibPAM.pam_close_session(pamh, 0)
@@ -163,13 +219,14 @@ module Sessions
     LibC.waitpid(pid, pointerof(raw_status), 0)
     puts "SSH session ended."
     sleep 1.second
+    ActionResult.ok(Action::NO_ACTION)
   end
 
   private def self.do_start_ssh_session(pw : LibC::Passwd, env : Hash(String, String), ssh_cmd : String, host : String) : ActionResult
     return ActionResult.new(value: Action::EXIT_CODE_1, error: "Greeter: Privilege drop pfailed; session aborted") if drop_privileges(pw).is_error?
     Dir.cd(env["HOME"])
     sshResult = ssh(env, ssh_cmd, env["USER"], host)
-    return fvwmResult if fvwmResult.is_error?
+    return sshResult if sshResult.is_error?
     ActionResult.ok(Action::NO_ACTION)
   end
 
@@ -180,26 +237,27 @@ module Sessions
     BooleanResult.ok(true)
   end
 
-  private def self.do_start_session(pw : LibC::Passwd, env : Hash(String, String), startx_cmd : String) : ActionResult
+  private def self.do_start_session(pw : LibC::Passwd, env : Hash(String, String), startx_cmd : String, wm_exec : String) : ActionResult
     tty_path = LibC.ttyname(STDIN.fd)
     unless tty_path.null?
       LibC.chown(tty_path, pw.pw_uid, pw.pw_gid)
     end
 
-    return ActionResult.new(value: Action::EXIT_CODE_1, error: "Greeter: Privilege drop pfailed; session aborted") if drop_privileges(pw).is_error?
+    return ActionResult.new(value: Action::EXIT_CODE_1, error: "Greeter: Privilege drop failed; session aborted") if drop_privileges(pw).is_error?
     Dir.cd(env["HOME"])
-    fvwmResult = fvwm(env, startx_cmd)
-    return fvwmResult if fvwmResult.is_error?
+    result = launch_wm(env, startx_cmd, wm_exec)
+    return result if result.is_error?
     ActionResult.ok(Action::NO_ACTION)
   end
 
-  def self.fvwm(env : Hash(String, String), startx_cmd : String) : ActionResult
+  def self.launch_wm(env : Hash(String, String), startx_cmd : String, wm_exec : String) : ActionResult
+    wm_args = wm_exec.split(' ', remove_empty: true)
     begin
       Process.exec(
         command: env["SHELL"],
         args: ["-l", "-c", "exec \"$@\"", "--",
                "systemd-run", "--user", "--scope", "--collect",
-               "--", startx_cmd, "fvwm3", "--", ":0", "vt1"],
+               "--", startx_cmd] + wm_args + ["--", ":0", "vt1"],
         env: env,
         clear_env: true
       )
