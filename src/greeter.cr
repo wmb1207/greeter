@@ -16,6 +16,7 @@ require "./auth"
 require "./terminal"
 require "./sessions"
 require "./action"
+require "./config"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # User lookup
@@ -209,14 +210,11 @@ end
 Signal::INT.trap { STDOUT.print "\e[8;1H[^C — back to login]\e[9;1H"; STDOUT.flush }
 
 class Greeter
+  def initialize(@config : Config)
+  end
+
   def run
-    loop do
-      do_run
-      # case do_run
-      # when Action::NEXT_ITER
-      #   next
-      # end
-    end
+    loop { do_run }
   end
 
   private def do_run : Action
@@ -228,14 +226,14 @@ class Greeter
 
     # ── header box (scales to panel width) ────────────────────────────────────
     inner = [panel_width - 2, 1].max
-    title = "WMB Greeter"
+    title = @config.title
     title = title[0, inner] if title.size > inner
     pad = inner - title.size
     lpad = pad // 2
     rpad = pad - lpad
-    STDOUT.print "\e[1;1H#{"+" + "-" * inner + "+"}"
-    STDOUT.print "\e[2;1H#{"|" + " " * lpad + title + " " * rpad + "|"}"
-    STDOUT.print "\e[3;1H#{"+" + "-" * inner + "+"}"
+    STDOUT.print "\e[1;1H#{Colors::BORDER}#{"+" + "-" * inner + "+"}#{Colors::RESET}"
+    STDOUT.print "\e[2;1H#{Colors::BORDER}|#{Colors::RESET}#{" " * lpad}#{Colors::TITLE}#{title}#{Colors::RESET}#{" " * rpad}#{Colors::BORDER}|#{Colors::RESET}"
+    STDOUT.print "\e[3;1H#{Colors::BORDER}#{"+" + "-" * inner + "+"}#{Colors::RESET}"
     STDOUT.flush
 
     # ── flush stale input before prompting ────────────────────────────────────
@@ -252,7 +250,7 @@ class Greeter
 
     if !authenticated_result.is_ok?
       msg = authenticated_result.error.not_nil!
-      STDOUT.print "\e[8;1H#{msg[0, panel_width].ljust(panel_width)}"
+      STDOUT.print "\e[8;1H#{Colors::ERROR}#{msg[0, panel_width].ljust(panel_width)}#{Colors::RESET}"
       STDOUT.flush
       sleep 2.seconds
       return Action::NEXT_ITER
@@ -261,7 +259,7 @@ class Greeter
     authenticated = authenticated_result.value.not_nil!
 
     welcome = "Hi, #{authenticated.username}."
-    STDOUT.print "\e[8;1H#{welcome[0, panel_width].ljust(panel_width)}"
+    STDOUT.print "\e[8;1H#{Colors::SUCCESS}#{welcome[0, panel_width].ljust(panel_width)}#{Colors::RESET}"
     STDOUT.flush
 
     menu panel_width, authenticated
@@ -269,78 +267,82 @@ class Greeter
 
   private def menu(panel_width : Int, authenticated : Auth::LoginSession)
     # ── session menu ──────────────────────────────────────────────────────────
-    wm_sessions = Sessions.available_sessions
+    wm_sessions = Sessions.available_sessions(@config.xsession_dirs)
+    config_entries = @config.menu
 
-    static_entries = [
-      "exit",
-      "reboot",
-      "shutdown",
-      "ssh",
-      "moonlight desktop.wmb.arpa",
-    ]
-
-    all_entries = wm_sessions.map(&.name) + static_entries
-    all_entries.each_with_index do |label, i|
-      line = "#{i + 1}) #{label}"
-      STDOUT.print "\e[#{10 + i};1H#{line[0, panel_width].ljust(panel_width)}"
+    all_labels = wm_sessions.map(&.name) + config_entries.map(&.label)
+    all_labels.each_with_index do |label, i|
+      num   = "#{Colors::NUMBER}#{i + 1})#{Colors::RESET}"
+      lbl   = "#{Colors::ITEM}#{label}#{Colors::RESET}"
+      plain = "#{i + 1}) #{label}"
+      pad   = " " * [panel_width - plain.size, 0].max
+      STDOUT.print "\e[#{10 + i};1H#{num} #{lbl}#{pad}"
     end
 
-    default = wm_sessions.empty? ? "" : "1"
-    choice_row = 10 + all_entries.size + 1
-    STDOUT.print "\e[#{choice_row};1HChoice [#{default}]: "
+    default    = wm_sessions.empty? ? "" : "1"
+    choice_row = 10 + all_labels.size + 1
+    STDOUT.print "\e[#{choice_row};1H#{Colors::MUTED}Choice [#{default}]:#{Colors::RESET} "
     STDOUT.flush
 
     choice = (STDIN.gets(chomp: true) || "").strip
     choice = default if choice.empty?
-
-    idx = (choice.to_i? || 0) - 1
+    idx      = (choice.to_i? || 0) - 1
     wm_count = wm_sessions.size
 
     if idx >= 0 && idx < wm_count
-      session = Sessions.launch_session(authenticated.pw, authenticated.pamh, wm_sessions[idx].exec)
+      session = Sessions.launch_session(
+        authenticated.pw, authenticated.pamh,
+        wm_sessions[idx].exec,
+        @config.vt, @config.seat
+      )
       unless session.is_ok?
         STDERR.puts session.error
         LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
       end
+    elsif idx >= wm_count && idx < wm_count + config_entries.size
+      dispatch_entry(config_entries[idx - wm_count], authenticated, choice_row)
     else
-      case idx - wm_count
-      when 0 # exit
-        LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
-        STDOUT.print "\e[#{choice_row + 1};1HGoodbye."
-        STDOUT.flush
-        exit 0
-      when 1 # reboot
-        LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
-        do_reboot
-      when 2 # shutdown
-        LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
-        do_shutdown
-      when 3 # ssh
-        STDOUT.print "\e[#{choice_row + 1};1HHost: "
-        STDOUT.flush
-        host = (STDIN.gets(chomp: true) || "").strip
-        if host.empty?
-          LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
-        else
-          session = Sessions.launch_ssh(authenticated.pw, authenticated.pamh, host)
-          unless session.is_ok?
-            STDERR.puts session.error
-            LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
-          end
-        end
-      when 4 # moonlight
-        launch_moonlight(authenticated.pw, authenticated.pamh, "desktop.wmb.arpa")
-      else
-        LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
-      end
+      LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
     end
 
     Action::NO_ACTION
   end
+
+  private def dispatch_entry(entry : MenuEntry, authenticated : Auth::LoginSession, choice_row : Int)
+    case entry.action
+    in .exit?
+      LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
+      STDOUT.print "\e[#{choice_row + 1};1H#{Colors::MUTED}Goodbye.#{Colors::RESET}"
+      STDOUT.flush
+      exit 0
+    in .reboot?
+      LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
+      do_reboot
+    in .shutdown?
+      LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
+      do_shutdown
+    in .ssh?
+      STDOUT.print "\e[#{choice_row + 1};1H#{Colors::PROMPT}Host:#{Colors::RESET} "
+      STDOUT.flush
+      host = (STDIN.gets(chomp: true) || "").strip
+      if host.empty?
+        LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
+      else
+        session = Sessions.launch_ssh(authenticated.pw, authenticated.pamh, host)
+        unless session.is_ok?
+          STDERR.puts session.error
+          LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
+        end
+      end
+    in .moonlight?
+      launch_moonlight(authenticated.pw, authenticated.pamh, entry.host || "localhost")
+    end
+  end
 end
 
 def main
-  greeter = Greeter.new
+  config = Config.load
+  greeter = Greeter.new(config)
   greeter.run
 end
 
