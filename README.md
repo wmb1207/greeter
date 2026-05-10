@@ -17,23 +17,56 @@ root throughout — only the child drops to the user's UID/GID before exec.
 
 ## Session menu
 
-| Choice | Action |
-|--------|--------|
-| 1 | fvwm3 via startx (X11) |
-| 2 | Exit greeter |
-| 3 | Reboot |
-| 4 | Shutdown |
-| 5 | SSH to `desktop.wmb.arpa` |
-| 6 | Moonlight stream from `desktop.wmb.arpa` (KMS/DRM, no X needed) |
+The menu is config-driven (see [Configuration](#configuration) below).
+X sessions are discovered automatically from `.desktop` files.
+Static entries follow — by default:
+
+| Entry | Action |
+|-------|--------|
+| (discovered xsessions) | X11 session via startx |
+| exit | Exit greeter |
+| reboot | `systemctl reboot` |
+| shutdown | `systemctl poweroff` |
+| ssh | SSH to a host (prompted) |
+| moonlight | Moonlight stream via KMS/DRM (no X needed) |
+
+## Configuration
+
+The greeter reads `/etc/greeter.conf` on startup (YAML). All fields are
+optional — missing keys fall back to compiled-in defaults.
+
+```yaml
+title: "WMB Greeter"
+vt: 1        # virtual terminal number
+seat: seat0
+
+xsession_dirs:
+  - /run/current-system/sw/share/xsessions
+  - /usr/share/xsessions
+
+menu:
+  - action: exit
+  - action: reboot
+  - action: shutdown
+  - action: ssh
+  - action: moonlight
+    host: desktop.wmb.arpa
+    label: "moonlight desktop.wmb.arpa"  # optional, derived if omitted
+```
+
+Supported actions: `exit`, `reboot`, `shutdown`, `ssh`, `moonlight`.
+If the file is absent or unparseable, defaults are used and a warning is
+printed to stderr.
 
 ## Architecture
 
 ```
 src/
-  greeter.cr    # Main loop, Greeter class, session menu
+  greeter.cr    # Main loop, Greeter class, session menu, action dispatch
+  config.cr     # Config struct, MenuAction enum, YAML loading
   auth.cr       # PAM authentication, LoginSession
   sessions.cr   # X session + SSH session launch
-  terminal.cr   # TTY input/output, sidebar, credential prompts
+  terminal.cr   # TTY input/output, sidebar, credential prompts, Colors
   libs.cr       # LibC + LibPAM bindings
   action.cr     # Action enum (flow control)
   result.cr     # Generic Result(T) type
