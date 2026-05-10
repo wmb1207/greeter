@@ -41,6 +41,29 @@
         };
       };
 
+      # ── NixOS module ────────────────────────────────────────────────────
+      # Import in your NixOS flake:
+      #
+      #   inputs.crystal-greeter.url = "github:you/crystal-greeter";
+      #
+      #   # in nixosSystem modules:
+      #   inputs.crystal-greeter.nixosModules.default
+      #
+      #   # then configure:
+      #   services.crystal-greeter = {
+      #     enable  = true;
+      #     package = inputs.crystal-greeter.packages.x86_64-linux.default;
+      #     title   = "My Machine";
+      #     menu = [
+      #       { action = "exit";     label = null; host = null; }
+      #       { action = "reboot";   label = null; host = null; }
+      #       { action = "shutdown"; label = null; host = null; }
+      #       { action = "ssh";      label = null; host = null; }
+      #       { action = "moonlight"; host = "myhost.local"; label = null; }
+      #     ];
+      #   };
+      nixosModules.default = import ./nixos-module.nix;
+
       # ── NixOS VM for isolated testing ───────────────────────────────────
       # Build + run with:  nix run .#vm
       # Or manually:       nix build .#nixosConfigurations.vm.config.system.build.vm
@@ -50,6 +73,7 @@
       nixosConfigurations.vm = lib.nixosSystem {
         inherit system;
         modules = [
+          self.nixosModules.default
           ({ config, pkgs, ... }: {
             system.stateVersion = "24.11";
 
@@ -64,11 +88,6 @@
               initialPassword = "test";
               extraGroups = [ "video" "input" ];
             };
-
-            # Ensure share/xsessions from installed WM packages gets linked
-            # into /run/current-system/sw/share/xsessions/ so the greeter
-            # can find the .desktop files.
-            environment.pathsToLink = [ "/share/xsessions" ];
 
             # Packages available in the VM session.
             # WM packages ship share/xsessions/*.desktop files; installing them
@@ -88,34 +107,18 @@
             # Allow SSH connections for testing the SSH menu option
             services.openssh.enable = true;
 
-            # Install the greeter as a setuid-root wrapper
-            security.wrappers.crystal-greeter = {
-              source = "${self.packages.${system}.default}/bin/crystal-greeter";
-              owner  = "root";
-              group  = "root";
-              setuid = true;
+            # ── greeter ──────────────────────────────────────────────
+            services.crystal-greeter = {
+              enable  = true;
+              package = self.packages.${system}.default;
+              title   = "greeter-test VM";
+              menu = [
+                { action = "exit";     label = null; host = null; }
+                { action = "reboot";   label = null; host = null; }
+                { action = "shutdown"; label = null; host = null; }
+                { action = "ssh";      label = null; host = null; }
+              ];
             };
-
-            # Replace getty on tty1 with the greeter
-            systemd.services."getty@tty1".enable   = false;
-            systemd.services."autovt@tty1".enable  = false;
-            systemd.services.crystal-greeter = {
-              description = "Crystal TTY greeter";
-              after       = [ "systemd-user-sessions.service" ];
-              wantedBy    = [ "multi-user.target" ];
-              conflicts   = [ "getty@tty1.service" ];
-              serviceConfig = {
-                ExecStart      = "/run/wrappers/bin/crystal-greeter";
-                StandardInput  = "tty";
-                StandardOutput = "tty";
-                TTYPath        = "/dev/tty1";
-                TTYReset       = true;
-                TTYVHangup     = true;
-                Restart        = "always";
-                RestartSec     = "1s";
-              };
-            };
-
           })
         ];
       };
