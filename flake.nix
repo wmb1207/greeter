@@ -146,6 +146,7 @@
           echo "  make build    release build     → ./greeter"
           echo "  make install  install setuid-root to /usr/local/bin"
           echo "  nix build     build via Nix     → ./result/bin/crystal-greeter"
+          echo "  nix run .#vm  run a vm to test the greeter"
           echo ""
         '';
       };

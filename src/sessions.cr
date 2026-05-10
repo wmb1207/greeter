@@ -16,16 +16,11 @@ module Sessions
     end
   end
 
-  XSESSION_DIRS = [
-    "/usr/share/xsessions",
-    "/run/current-system/sw/share/xsessions",
-  ]
-
-  def self.available_sessions : Array(XSession)
+  def self.available_sessions(dirs : Array(String)) : Array(XSession)
     sessions = [] of XSession
     seen = Set(String).new
 
-    XSESSION_DIRS.each do |dir|
+    dirs.each do |dir|
       Dir.glob("#{dir}/*.desktop").sort.each do |path|
         next if seen.includes?(path)
         seen.add(path)
@@ -84,7 +79,7 @@ module Sessions
     LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
   end
 
-  def self.env_vars(pamh : LibPAM::PamHandle, pw : LibC::Passwd)
+  def self.env_vars(pamh : LibPAM::PamHandle, pw : LibC::Passwd, vt : Int32 = 1, seat : String = "seat0")
     user = String.new(pw.pw_name)
     home = String.new(pw.pw_dir)
     shell = String.new(pw.pw_shell)
@@ -103,8 +98,8 @@ module Sessions
       # Tells systemd-logind / D-Bus what kind of session this is.
       "XDG_SESSION_TYPE"  => "x11",
       "XDG_SESSION_CLASS" => "user",
-      "XDG_SEAT"          => "seat0",
-      "XDG_VTNR"          => "1",
+      "XDG_SEAT"          => seat,
+      "XDG_VTNR"          => vt.to_s,
     }
 
     with_pam_env(env, pamh)
@@ -116,8 +111,8 @@ module Sessions
     merged
   end
 
-  def self.launch_session(pw : LibC::Passwd, pamh : LibPAM::PamHandle, wm_exec : String) : ActionResult
-    local_env_vars = env_vars(pamh, pw)
+  def self.launch_session(pw : LibC::Passwd, pamh : LibPAM::PamHandle, wm_exec : String, vt : Int32 = 1, seat : String = "seat0") : ActionResult
+    local_env_vars = env_vars(pamh, pw, vt, seat)
     # Build a PATH for the child session.
     # On NixOS, tools like uname/expr/hexdump may only exist in nix store paths
     # not exposed via /run/current-system/sw/bin.  Find coreutils and util-linux
@@ -150,7 +145,7 @@ module Sessions
       LibPAM.pam_set_item(pamh, LibPAM::PAM_TTY, ptr)
     end
     ["XDG_SESSION_TYPE=x11", "XDG_SESSION_CLASS=user",
-     "XDG_SEAT=seat0", "XDG_VTNR=1"].each do |kv|
+     "XDG_SEAT=#{seat}", "XDG_VTNR=#{vt}"].each do |kv|
       LibPAM.pam_putenv(pamh, kv)
     end
 
@@ -165,7 +160,7 @@ module Sessions
 
     pid = LibC.fork
     if pid == 0
-      sessionResult = do_start_session(pw, env_vars(pamh, pw), startx_cmd, wm_exec)
+      sessionResult = do_start_session(pw, env_vars(pamh, pw, vt, seat), startx_cmd, wm_exec)
       return sessionResult if sessionResult.is_error?
     elsif pid < 0
       LibPAM.pam_close_session(pamh, 0)
