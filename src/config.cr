@@ -1,4 +1,5 @@
 require "yaml"
+require "./logger"
 
 CONFIG_PATH = "/etc/greeter.conf"
 
@@ -45,7 +46,7 @@ struct Config
     return new unless File.exists?(path)
     parse(YAML.parse(File.read(path)))
   rescue ex
-    STDERR.puts "greeter: config error (#{path}): #{ex.message}; using defaults"
+    Logger.error("config.load_failed", "Config error; using defaults", {path: path, error: ex.message})
     new
   end
 
@@ -70,7 +71,7 @@ struct Config
     when "ssh"       then MenuAction::SSH
     when "moonlight" then MenuAction::Moonlight
     else
-      STDERR.puts "greeter: unknown menu action '#{action_str}'"
+      Logger.warn("config.unknown_menu_action", "Ignoring unknown menu action", {action: action_str})
       return nil
     end
 

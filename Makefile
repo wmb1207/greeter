@@ -1,4 +1,4 @@
-.PHONY: build debug install clean
+.PHONY: build debug spec install clean
 
 # Release build (optimised, smaller binary)
 build:
@@ -7,6 +7,9 @@ build:
 # Debug build (fast compile, keeps debug symbols)
 debug:
 	crystal build src/greeter.cr -o greeter
+
+spec:
+	crystal spec spec/logger_spec.cr
 
 # Install setuid-root so the binary can call PAM, setuid, setgid
 install: build

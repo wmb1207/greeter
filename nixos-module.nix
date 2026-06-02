@@ -128,6 +128,7 @@ in
         ExecStart      = "/run/wrappers/bin/crystal-greeter";
         StandardInput  = "tty";
         StandardOutput = "tty";
+        StandardError  = "journal";
         TTYPath        = "/dev/tty${toString cfg.vt}";
         TTYReset       = true;
         TTYVHangup     = true;

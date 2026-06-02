@@ -17,6 +17,7 @@ require "./terminal"
 require "./sessions"
 require "./action"
 require "./config"
+require "./logger"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # User lookup
@@ -37,15 +38,15 @@ end
 
 def drop_privileges(pw : LibC::Passwd) : Bool
   if LibC.initgroups(pw.pw_name, pw.pw_gid) != 0
-    STDERR.puts "greeter: initgroups failed"
+    Logger.error("privileges.initgroups_failed", "Could not initialize supplementary groups", {uid: pw.pw_uid})
     return false
   end
   if LibC.setgid(pw.pw_gid) != 0
-    STDERR.puts "greeter: setgid(#{pw.pw_gid}) failed"
+    Logger.error("privileges.setgid_failed", "Could not set process gid", {uid: pw.pw_uid, gid: pw.pw_gid})
     return false
   end
   if LibC.setuid(pw.pw_uid) != 0
-    STDERR.puts "greeter: setuid(#{pw.pw_uid}) failed"
+    Logger.error("privileges.setuid_failed", "Could not set process uid", {uid: pw.pw_uid})
     return false
   end
   true
@@ -92,11 +93,11 @@ def launch_moonlight(pw : LibC::Passwd, pamh : LibPAM::PamHandle, host : String)
     .flat_map { |d| ["#{d}/moonlight", "#{d}/moonlight-qt"] }
     .find { |p| File::Info.executable?(p) }
   if moonlight_cmd.nil?
-    STDERR.puts "greeter: moonlight / moonlight-qt not found in PATH"
+    Logger.error("session.moonlight.command_missing", "moonlight command not found in session PATH", {username: user, uid: pw.pw_uid, host: host})
     LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
     return
   end
-  STDERR.puts "greeter: moonlight resolved to #{moonlight_cmd}"
+  Logger.debug("session.moonlight.command_resolved", "Resolved moonlight command", {username: user, uid: pw.pw_uid, command: moonlight_cmd})
 
   tty_path_str = LibC.ttyname(STDIN.fd)
   tty_str = tty_path_str.null? ? "/dev/tty1" : String.new(tty_path_str)
@@ -110,7 +111,7 @@ def launch_moonlight(pw : LibC::Passwd, pamh : LibPAM::PamHandle, host : String)
 
   ret = LibPAM.pam_open_session(pamh, 0)
   if ret != LibPAM::PAM_SUCCESS
-    STDERR.puts "greeter: pam_open_session failed (#{ret})"
+    Logger.error("session.moonlight.pam_open_failed", "PAM session could not open", {username: user, uid: pw.pw_uid, host: host, pam_code: ret})
   end
 
   pam_env = {} of String => String
@@ -140,6 +141,7 @@ def launch_moonlight(pw : LibC::Passwd, pamh : LibPAM::PamHandle, host : String)
   }
   pam_env.each { |k, v| env[k] ||= v }
 
+  Logger.info("session.moonlight.starting", "Starting Moonlight session", {username: user, uid: pw.pw_uid, host: host})
   puts "Connecting to #{host} via Moonlight..."
 
   pid = LibC.fork
@@ -150,7 +152,7 @@ def launch_moonlight(pw : LibC::Passwd, pamh : LibPAM::PamHandle, host : String)
     end
 
     unless drop_privileges(pw)
-      STDERR.puts "greeter: privilege drop failed; moonlight aborted"
+      Logger.error("session.moonlight.privilege_drop_failed", "Privilege drop failed; Moonlight session aborted", {username: user, uid: pw.pw_uid, host: host})
       exit 1
     end
     Dir.cd(home)
@@ -163,11 +165,11 @@ def launch_moonlight(pw : LibC::Passwd, pamh : LibPAM::PamHandle, host : String)
         clear_env: true
       )
     rescue ex
-      STDERR.puts "greeter: exec moonlight failed: #{ex.message}"
+      Logger.error("session.moonlight.exec_failed", "Could not exec moonlight", {username: user, uid: pw.pw_uid, host: host, error: ex.message})
       exit 1
     end
   elsif pid < 0
-    STDERR.puts "greeter: fork failed"
+    Logger.error("session.moonlight.fork_failed", "Could not fork Moonlight session", {username: user, uid: pw.pw_uid, host: host})
     LibPAM.pam_close_session(pamh, 0)
     LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
     return
@@ -178,8 +180,10 @@ def launch_moonlight(pw : LibC::Passwd, pamh : LibPAM::PamHandle, host : String)
   exited = (raw_status & 0x7f) == 0
   exit_code = (raw_status >> 8) & 0xff
   if exited && exit_code == 0
+    Logger.info("session.moonlight.ended", "Moonlight session ended", {username: user, uid: pw.pw_uid, host: host, exit_code: exit_code})
     puts "Moonlight session ended normally."
   else
+    Logger.warn("session.moonlight.ended", "Moonlight session exited abnormally", {username: user, uid: pw.pw_uid, host: host, exit_code: exit_code})
     puts "Moonlight session exited (code #{exit_code})."
   end
 
@@ -296,7 +300,7 @@ class Greeter
         @config.vt, @config.seat
       )
       unless session.is_ok?
-        STDERR.puts session.error
+        Logger.error("session.x11.launch_failed", "X11 session launch failed", {username: authenticated.username, uid: authenticated.pw.pw_uid, error: session.error})
         LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
       end
     elsif idx >= wm_count && idx < wm_count + config_entries.size
@@ -330,7 +334,7 @@ class Greeter
       else
         session = Sessions.launch_ssh(authenticated.pw, authenticated.pamh, host)
         unless session.is_ok?
-          STDERR.puts session.error
+          Logger.error("session.ssh.launch_failed", "SSH session launch failed", {username: authenticated.username, uid: authenticated.pw.pw_uid, host: host, error: session.error})
           LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
         end
       end

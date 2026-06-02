@@ -64,6 +64,7 @@ printed to stderr.
 src/
   greeter.cr    # Main loop, Greeter class, session menu, action dispatch
   config.cr     # Config struct, MenuAction enum, YAML loading
+  logger.cr     # JSONL operational logging
   auth.cr       # PAM authentication, LoginSession
   sessions.cr   # X session + SSH session launch
   terminal.cr   # TTY input/output, sidebar, credential prompts, Colors
@@ -86,6 +87,17 @@ Requires the nix dev shell for `linux-pam` headers:
 ```sh
 nix develop --command make build   # release build
 make debug                         # debug build (faster compile)
+make spec                          # logger specs
+```
+
+## Logging
+
+Operational diagnostics are emitted as JSONL on stderr. The NixOS service sends
+stderr to journald while keeping the interactive UI on the TTY. Each record has
+`timestamp`, `level`, `event`, `message`, and nested `fields` keys.
+
+```sh
+journalctl -u crystal-greeter.service -o cat
 ```
 
 ## Install

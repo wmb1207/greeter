@@ -1,26 +1,26 @@
 require "./result"
 
-# ANSI color codes mapped to the creamsody-darker 16-color palette.
-# color4  (#4a6a78) active steel-blue  → \e[34m / \e[94m bright variant #5a7888
-# color6  (#4a7070) teal               → \e[36m  (borders)
-# color7  (#9a9888) activeAlt gray     → \e[37m  (normal text / menu items)
-# color8  (#3a3830) dark gray          → \e[90m  (dim / sidebar)
-# color9  (#9a5035) orange-red         → \e[91m  (errors)
-# color10 (#7a8060) sage green         → \e[92m  (success / welcome)
-# color11 (#9a8050) gold               → \e[93m  (menu numbers)
-# color12 (#5a7888) light blue         → \e[94m  (prompts)
-# color15 (#b5b2a0) foreground warm-wh → \e[97m  (title)
+# ANSI 256-color codes — Nord-earthy palette.
+# 66  dusty teal-slate  → borders / structural lines
+# 223 warm cream        → title (bold)
+# 240 charcoal gray     → sidebar dim bar
+# 109 dusty slate-blue  → prompts (login / password)
+# 136 ochre/amber       → menu index numbers
+# 144 warm khaki        → menu labels
+# 106 moss green        → success / welcome messages
+# 130 terracotta rust   → auth failure / errors
+# 101 olive-gray        → muted choice prompt
 module Colors
   RESET   = "\e[0m"
-  BORDER  = "\e[36m"    # color6  teal — box lines and sidebar
-  TITLE   = "\e[1;97m"  # bold color15 — header title
-  DIM     = "\e[90m"    # color8  dark gray — sidebar bar
-  PROMPT  = "\e[94m"    # color12 light blue — "login:" / "Password:"
-  NUMBER  = "\e[93m"    # color11 gold — menu index numbers
-  ITEM    = "\e[37m"    # color7  activeAlt — menu labels
-  SUCCESS = "\e[92m"    # color10 sage green — welcome / ok messages
-  ERROR   = "\e[91m"    # color9  orange-red — auth failure
-  MUTED   = "\e[90m"    # color8  dark gray — choice prompt
+  BORDER  = "\e[38;5;66m"    # dusty teal-slate — box lines and sidebar
+  TITLE   = "\e[1;38;5;223m" # warm cream, bold — header title
+  DIM     = "\e[38;5;240m"   # charcoal gray — sidebar bar
+  PROMPT  = "\e[38;5;109m"   # dusty slate-blue — "login:" / "Password:"
+  NUMBER  = "\e[38;5;136m"   # ochre/amber — menu index numbers
+  ITEM    = "\e[38;5;144m"   # warm khaki — menu labels
+  SUCCESS = "\e[38;5;106m"   # moss green — welcome / ok messages
+  ERROR   = "\e[38;5;130m"   # terracotta rust — auth failure
+  MUTED   = "\e[38;5;101m"   # olive-gray — choice prompt
 end
 
 module Terminal

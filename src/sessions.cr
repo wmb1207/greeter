@@ -1,6 +1,7 @@
 require "./result"
 require "./libs"
 require "./action"
+require "./logger"
 
 module Sessions
   TTY1 = "/dev/tty1"
@@ -129,12 +130,10 @@ module Sessions
       .map { |d| "#{d}/startx" }
       .find { |p| File::Info.executable?(p) }
 
-    return ActionResult.error("Greeter: startx command not found in session PATH: #{local_session_path}") if startx_cmd.nil?
-    # This has to be done outside of this
-    # STDERR.puts "greeter: startx not found in session PATH: #{session_path}"
-    # LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
-    # return
-
+    if startx_cmd.nil?
+      Logger.error("session.x11.startx_missing", "startx command not found in session PATH", {username: local_env_vars["USER"], uid: pw.pw_uid})
+      return ActionResult.error("Greeter: startx command not found in session PATH: #{local_session_path}")
+    end
     # Tell pam_systemd which TTY and seat/VT this session belongs to.
     # These must be set BEFORE pam_open_session so logind registers the
     # session as Active=yes on seat0/vt1.  Without this polkit refuses
@@ -154,8 +153,12 @@ module Sessions
     # sets up the PAM environment for the session.  Without this call there is
     # no audio because the audio server never starts.
     ret = LibPAM.pam_open_session(pamh, 0)
-    return ActionResult.error("Greeter: pam_open_session failed (#{ret}) — audio may be unavailable") if ret != LibPAM::PAM_SUCCESS
+    if ret != LibPAM::PAM_SUCCESS
+      Logger.error("session.x11.pam_open_failed", "PAM session could not open", {username: local_env_vars["USER"], uid: pw.pw_uid, pam_code: ret})
+      return ActionResult.error("Greeter: pam_open_session failed (#{ret}) — audio may be unavailable")
+    end
 
+    Logger.info("session.x11.starting", "Starting X11 session", {username: local_env_vars["USER"], uid: pw.pw_uid, session: wm_exec})
     puts "Starting #{wm_exec.split.first} session for #{local_env_vars["USER"]}..."
 
     pid = LibC.fork
@@ -163,6 +166,7 @@ module Sessions
       sessionResult = do_start_session(pw, env_vars(pamh, pw, vt, seat), startx_cmd, wm_exec)
       return sessionResult if sessionResult.is_error?
     elsif pid < 0
+      Logger.error("session.x11.fork_failed", "Could not fork X11 session", {username: local_env_vars["USER"], uid: pw.pw_uid, session: wm_exec})
       LibPAM.pam_close_session(pamh, 0)
       LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
       return ActionResult.new(value: Action::NO_ACTION, error: "Greeter: fork failed")
@@ -174,8 +178,10 @@ module Sessions
     exited = (raw_status & 0x7f) == 0
     exit_code = (raw_status >> 8) & 0xff
     if exited && exit_code == 0
+      Logger.info("session.x11.ended", "X11 session ended", {username: local_env_vars["USER"], uid: pw.pw_uid, session: wm_exec, exit_code: exit_code})
       puts "Session ended normally."
     else
+      Logger.warn("session.x11.ended", "X11 session exited abnormally", {username: local_env_vars["USER"], uid: pw.pw_uid, session: wm_exec, exit_code: exit_code})
       puts "Session exited (code #{exit_code})."
     end
 
@@ -194,12 +200,14 @@ module Sessions
       .find { |p| File::Info.executable?(p) }
 
     if ssh_cmd.nil?
+      Logger.error("session.ssh.command_missing", "ssh command not found in session PATH", {username: local_env_vars["USER"], uid: pw.pw_uid, host: host})
       return ActionResult.new(
         value: Action::EXIT_CODE_1,
         error: "Greeter: ssh not found in path"
       )
     end
 
+    Logger.info("session.ssh.starting", "Starting SSH session", {username: local_env_vars["USER"], uid: pw.pw_uid, host: host})
     puts "Connecting to #{host}..."
 
     pid = LibC.fork
@@ -207,11 +215,19 @@ module Sessions
       ssh_session = do_start_ssh_session(pw, local_env_vars, ssh_cmd, host)
       return ssh_session if ssh_session
     elsif pid < 0
+      Logger.error("session.ssh.fork_failed", "Could not fork SSH session", {username: local_env_vars["USER"], uid: pw.pw_uid, host: host})
       return ActionResult.new(value: Action::NO_ACTION, error: "Greeter: fork failed")
     end
 
     raw_status = 0_i32
     LibC.waitpid(pid, pointerof(raw_status), 0)
+    exited = (raw_status & 0x7f) == 0
+    exit_code = (raw_status >> 8) & 0xff
+    if exited && exit_code == 0
+      Logger.info("session.ssh.ended", "SSH session ended", {username: local_env_vars["USER"], uid: pw.pw_uid, host: host, exit_code: exit_code})
+    else
+      Logger.warn("session.ssh.ended", "SSH session exited abnormally", {username: local_env_vars["USER"], uid: pw.pw_uid, host: host, exit_code: exit_code})
+    end
     puts "SSH session ended."
     sleep 1.second
     ActionResult.ok(Action::NO_ACTION)

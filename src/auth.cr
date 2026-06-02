@@ -1,5 +1,6 @@
 require "./result"
 require "./libs"
+require "./logger"
 
 module Auth
   struct LoginSession
@@ -26,7 +27,12 @@ module Auth
     return LoginSessionResult.error("Login incorrect.") unless pamh
 
     pw = find_user(creds.username)
-    return LoginSessionResult.error("Greeter: No passwd entry for '#{creds.username}'") unless pw
+    unless pw
+      Logger.error("auth.passwd_entry_missing", "Authenticated user has no passwd entry", {username: creds.username})
+      return LoginSessionResult.error("Greeter: No passwd entry for '#{creds.username}'")
+    end
+
+    Logger.info("auth.succeeded", "Authentication succeeded", {username: creds.username, uid: pw.pw_uid})
 
     LoginSessionResult.ok(LoginSession.new(
       username: creds.username,
@@ -50,13 +56,14 @@ module Auth
     pamh = uninitialized LibPAM::PamHandle
     ret = LibPAM.pam_start("login", username, pointerof(conv), pointerof(pamh))
     unless ret == LibPAM::PAM_SUCCESS
-      STDERR.puts "greeter: pam_start failed (#{ret})"
+      Logger.error("auth.pam_start_failed", "PAM transaction could not start", {username: username, pam_code: ret})
       return nil
     end
 
     # Step 1: verify the supplied credentials.
     ret = LibPAM.pam_authenticate(pamh, 0)
     unless ret == LibPAM::PAM_SUCCESS
+      Logger.warn("auth.rejected", "PAM authentication rejected credentials", {username: username, pam_code: ret})
       LibPAM.pam_end(pamh, ret)
       return nil
     end
@@ -64,6 +71,7 @@ module Auth
     # Step 2: check the account is usable (not expired, not locked, etc.).
     ret = LibPAM.pam_acct_mgmt(pamh, 0)
     unless ret == LibPAM::PAM_SUCCESS
+      Logger.warn("auth.account_rejected", "PAM account check rejected user", {username: username, pam_code: ret})
       LibPAM.pam_end(pamh, ret)
       return nil
     end
