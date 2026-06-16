@@ -15,6 +15,7 @@ require "./libs"
 require "./auth"
 require "./terminal"
 require "./sessions"
+require "./session_tracker"
 require "./action"
 require "./config"
 require "./logger"
@@ -213,6 +214,13 @@ end
 
 Signal::INT.trap { STDOUT.print "\e[8;1H[^C — back to login]\e[9;1H"; STDOUT.flush }
 
+Signal::CHLD.trap do
+  SessionTracker.reap_all.each do |pid, entry|
+    Sessions.close_pam_session(entry.pamh)
+    Logger.info("session.x11.ended", "X11 session ended", {username: entry.username, vt: entry.vt, display: entry.display, pid: pid})
+  end
+end
+
 class Greeter
   def initialize(@config : Config)
   end
@@ -294,14 +302,22 @@ class Greeter
     wm_count = wm_sessions.size
 
     if idx >= 0 && idx < wm_count
-      session = Sessions.launch_session(
-        authenticated.pw, authenticated.pamh,
-        wm_sessions[idx].exec,
-        @config.vt, @config.seat
-      )
-      unless session.is_ok?
-        Logger.error("session.x11.launch_failed", "X11 session launch failed", {username: authenticated.username, uid: authenticated.pw.pw_uid, error: session.error})
+      vt = SessionTracker.next_vt
+      if vt.nil?
+        STDOUT.print "\e[#{choice_row + 1};1H#{Colors::ERROR}All session slots in use (max #{SessionTracker.capacity}).#{Colors::RESET}"
+        STDOUT.flush
+        sleep 2.seconds
         LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
+      else
+        result = Sessions.launch_session(
+          authenticated.pw, authenticated.pamh,
+          wm_sessions[idx].exec,
+          vt, @config.seat
+        )
+        unless result.is_ok?
+          Logger.error("session.x11.launch_failed", "X11 session launch failed", {username: authenticated.username, uid: authenticated.pw.pw_uid, error: result.error})
+          # launch_session already cleaned up pamh on error
+        end
       end
     elsif idx >= wm_count && idx < wm_count + config_entries.size
       dispatch_entry(config_entries[idx - wm_count], authenticated, choice_row)

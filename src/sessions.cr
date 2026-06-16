@@ -112,7 +112,7 @@ module Sessions
     merged
   end
 
-  def self.launch_session(pw : LibC::Passwd, pamh : LibPAM::PamHandle, wm_exec : String, vt : Int32 = 1, seat : String = "seat0") : ActionResult
+  def self.launch_session(pw : LibC::Passwd, pamh : LibPAM::PamHandle, wm_exec : String, vt : Int32, seat : String = "seat0") : ActionResult
     local_env_vars = env_vars(pamh, pw, vt, seat)
     # Build a PATH for the child session.
     # On NixOS, tools like uname/expr/hexdump may only exist in nix store paths
@@ -132,14 +132,14 @@ module Sessions
 
     if startx_cmd.nil?
       Logger.error("session.x11.startx_missing", "startx command not found in session PATH", {username: local_env_vars["USER"], uid: pw.pw_uid})
+      LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
       return ActionResult.error("Greeter: startx command not found in session PATH: #{local_session_path}")
     end
+
     # Tell pam_systemd which TTY and seat/VT this session belongs to.
     # These must be set BEFORE pam_open_session so logind registers the
-    # session as Active=yes on seat0/vt1.  Without this polkit refuses
-    # reboot/shutdown with "interactive authentication required".
-    tty_path_str = LibC.ttyname(STDIN.fd)
-    tty_str = tty_path_str.null? ? TTY1 : String.new(tty_path_str)
+    # session as Active=yes on the correct seat/VT.
+    tty_str = "/dev/tty#{vt}"
     tty_str.to_unsafe.as(Void*).tap do |ptr|
       LibPAM.pam_set_item(pamh, LibPAM::PAM_TTY, ptr)
     end
@@ -150,42 +150,33 @@ module Sessions
 
     # Register the session with systemd-logind.  This creates /run/user/<uid>,
     # starts the user's systemd slice (and with it PipeWire/PulseAudio), and
-    # sets up the PAM environment for the session.  Without this call there is
-    # no audio because the audio server never starts.
+    # sets up the PAM environment for the session.
     ret = LibPAM.pam_open_session(pamh, 0)
     if ret != LibPAM::PAM_SUCCESS
       Logger.error("session.x11.pam_open_failed", "PAM session could not open", {username: local_env_vars["USER"], uid: pw.pw_uid, pam_code: ret})
-      return ActionResult.error("Greeter: pam_open_session failed (#{ret}) — audio may be unavailable")
+      LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
+      return ActionResult.error("Greeter: pam_open_session failed (#{ret})")
     end
 
-    Logger.info("session.x11.starting", "Starting X11 session", {username: local_env_vars["USER"], uid: pw.pw_uid, session: wm_exec})
-    puts "Starting #{wm_exec.split.first} session for #{local_env_vars["USER"]}..."
+    display = vt - SessionTracker::FIRST_VT
+    username = local_env_vars["USER"]
+
+    Logger.info("session.x11.starting", "Starting X11 session", {username: username, uid: pw.pw_uid, session: wm_exec, vt: vt, display: display})
+    puts "Launching #{wm_exec.split.first} on :#{display} (vt#{vt}) for #{username}..."
 
     pid = LibC.fork
     if pid == 0
-      sessionResult = do_start_session(pw, env_vars(pamh, pw, vt, seat), startx_cmd, wm_exec)
-      return sessionResult if sessionResult.is_error?
+      do_start_session(pw, env_vars(pamh, pw, vt, seat), startx_cmd, wm_exec, vt, display)
+      exit(1)
     elsif pid < 0
-      Logger.error("session.x11.fork_failed", "Could not fork X11 session", {username: local_env_vars["USER"], uid: pw.pw_uid, session: wm_exec})
-      LibPAM.pam_close_session(pamh, 0)
-      LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
-      return ActionResult.new(value: Action::NO_ACTION, error: "Greeter: fork failed")
+      Logger.error("session.x11.fork_failed", "Could not fork X11 session", {username: username, uid: pw.pw_uid, session: wm_exec})
+      close_pam_session(pamh)
+      return ActionResult.error("Greeter: fork failed")
     end
 
-    # ── parent — wait for the X session to exit ─────────────────────────────
-    raw_status = 0_i32
-    LibC.waitpid(pid, pointerof(raw_status), 0)
-    exited = (raw_status & 0x7f) == 0
-    exit_code = (raw_status >> 8) & 0xff
-    if exited && exit_code == 0
-      Logger.info("session.x11.ended", "X11 session ended", {username: local_env_vars["USER"], uid: pw.pw_uid, session: wm_exec, exit_code: exit_code})
-      puts "Session ended normally."
-    else
-      Logger.warn("session.x11.ended", "X11 session exited abnormally", {username: local_env_vars["USER"], uid: pw.pw_uid, session: wm_exec, exit_code: exit_code})
-      puts "Session exited (code #{exit_code})."
-    end
-
-    close_pam_session(pamh)
+    # ── parent: record session and return immediately ────────────────────────
+    # PAM cleanup happens in the Signal::CHLD handler when the child exits.
+    SessionTracker.add(pid, SessionTracker::Entry.new(vt, display, username, pamh))
     ActionResult.ok(Action::NO_ACTION)
   end
 
@@ -248,27 +239,22 @@ module Sessions
     BooleanResult.ok(true)
   end
 
-  private def self.do_start_session(pw : LibC::Passwd, env : Hash(String, String), startx_cmd : String, wm_exec : String) : ActionResult
-    tty_path = LibC.ttyname(STDIN.fd)
-    unless tty_path.null?
-      LibC.chown(tty_path, pw.pw_uid, pw.pw_gid)
-    end
+  private def self.do_start_session(pw : LibC::Passwd, env : Hash(String, String), startx_cmd : String, wm_exec : String, vt : Int32, display : Int32) : ActionResult
+    LibC.chown("/dev/tty#{vt}", pw.pw_uid, pw.pw_gid)
 
     return ActionResult.new(value: Action::EXIT_CODE_1, error: "Greeter: Privilege drop failed; session aborted") if drop_privileges(pw).is_error?
     Dir.cd(env["HOME"])
-    result = launch_wm(env, startx_cmd, wm_exec)
-    return result if result.is_error?
-    ActionResult.ok(Action::NO_ACTION)
+    launch_wm(env, startx_cmd, wm_exec, vt, display)
   end
 
-  def self.launch_wm(env : Hash(String, String), startx_cmd : String, wm_exec : String) : ActionResult
+  def self.launch_wm(env : Hash(String, String), startx_cmd : String, wm_exec : String, vt : Int32, display : Int32) : ActionResult
     wm_args = wm_exec.split(' ', remove_empty: true)
     begin
       Process.exec(
         command: env["SHELL"],
         args: ["-l", "-c", "exec \"$@\"", "--",
                "systemd-run", "--user", "--scope", "--collect",
-               "--", startx_cmd] + wm_args + ["--", ":0", "vt1"],
+               "--", startx_cmd] + wm_args + ["--", ":#{display}", "vt#{vt}"],
         env: env,
         clear_env: true
       )
