@@ -96,6 +96,10 @@ module Sessions
       # pam_open_session (via pam_systemd) creates this directory;
       # we set it explicitly so the child always has the right value.
       "XDG_RUNTIME_DIR" => "/run/user/#{pw.pw_uid}",
+      # Standard location for the per-user systemd/D-Bus broker.  The session
+      # runs with a cleared environment, so set it explicitly for audio clients
+      # and other user services that need to activate through D-Bus.
+      "DBUS_SESSION_BUS_ADDRESS" => "unix:path=/run/user/#{pw.pw_uid}/bus",
       # Tells systemd-logind / D-Bus what kind of session this is.
       "XDG_SESSION_TYPE"  => "x11",
       "XDG_SESSION_CLASS" => "user",
