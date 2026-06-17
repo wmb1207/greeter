@@ -15,7 +15,21 @@ module SessionTracker
     end
   end
 
+  struct Reaped
+    getter pid    : Int32
+    getter entry  : Entry
+    getter status : Int32
+
+    def initialize(@pid, @entry, @status)
+    end
+  end
+
   @@table = {} of Int32 => Entry
+  @@reap_requested = false
+
+  def self.request_reap
+    @@reap_requested = true
+  end
 
   def self.next_vt : Int32?
     used = @@table.values.map(&.vt).to_set
@@ -28,17 +42,22 @@ module SessionTracker
 
   # Reap all finished children without blocking. Returns every (pid, entry)
   # pair that was in the table so callers can close the PAM session.
-  def self.reap_all : Array({Int32, Entry})
-    found = [] of {Int32, Entry}
+  def self.reap_all : Array(Reaped)
+    @@reap_requested = false
+    found = [] of Reaped
     raw = 0_i32
     loop do
       pid = LibC.waitpid(-1, pointerof(raw), LibC::WNOHANG)
       break if pid <= 0
       if (e = @@table.delete(pid))
-        found << {pid, e}
+        found << Reaped.new(pid, e, raw)
       end
     end
     found
+  end
+
+  def self.reap_requested? : Bool
+    @@reap_requested
   end
 
   def self.capacity : Int32

@@ -175,7 +175,7 @@ module Sessions
     end
 
     # ── parent: record session and return immediately ────────────────────────
-    # PAM cleanup happens in the Signal::CHLD handler when the child exits.
+    # PAM cleanup happens when the greeter reaps this child from normal flow.
     SessionTracker.add(pid, SessionTracker::Entry.new(vt, display, username, pamh))
     ActionResult.ok(Action::NO_ACTION)
   end
@@ -254,7 +254,7 @@ module Sessions
         command: env["SHELL"],
         args: ["-l", "-c", "exec \"$@\"", "--",
                "systemd-run", "--user", "--scope", "--collect",
-               "--", startx_cmd] + wm_args + ["--", ":#{display}", "vt#{vt}"],
+               "--wait", "--", startx_cmd] + wm_args + ["--", ":#{display}", "vt#{vt}"],
         env: env,
         clear_env: true
       )

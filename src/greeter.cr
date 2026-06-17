@@ -214,10 +214,36 @@ end
 
 Signal::INT.trap { STDOUT.print "\e[8;1H[^C — back to login]\e[9;1H"; STDOUT.flush }
 
-Signal::CHLD.trap do
-  SessionTracker.reap_all.each do |pid, entry|
+Signal::CHLD.trap { SessionTracker.request_reap }
+
+def reap_finished_x11_sessions
+  return unless SessionTracker.reap_requested? || SessionTracker.size > 0
+
+  SessionTracker.reap_all.each do |reaped|
+    entry = reaped.entry
+    status = reaped.status
+    exited = (status & 0x7f) == 0
+    exit_code = (status >> 8) & 0xff
+    signal = status & 0x7f
+
     Sessions.close_pam_session(entry.pamh)
-    Logger.info("session.x11.ended", "X11 session ended", {username: entry.username, vt: entry.vt, display: entry.display, pid: pid})
+
+    if exited && exit_code == 0
+      Logger.info("session.x11.ended", "X11 session ended", {
+        username: entry.username, vt: entry.vt, display: entry.display,
+        pid: reaped.pid, exit_code: exit_code,
+      })
+    elsif exited
+      Logger.warn("session.x11.ended", "X11 session exited abnormally", {
+        username: entry.username, vt: entry.vt, display: entry.display,
+        pid: reaped.pid, exit_code: exit_code,
+      })
+    else
+      Logger.warn("session.x11.ended", "X11 session terminated by signal", {
+        username: entry.username, vt: entry.vt, display: entry.display,
+        pid: reaped.pid, signal: signal,
+      })
+    end
   end
 end
 
@@ -230,6 +256,8 @@ class Greeter
   end
 
   private def do_run : Action
+    reap_finished_x11_sessions
+
     Terminal.clear_screen
     _, rows = Terminal.draw_sidebar
     _, cols = Terminal.term_size
@@ -302,6 +330,7 @@ class Greeter
     wm_count = wm_sessions.size
 
     if idx >= 0 && idx < wm_count
+      reap_finished_x11_sessions
       vt = SessionTracker.next_vt
       if vt.nil?
         STDOUT.print "\e[#{choice_row + 1};1H#{Colors::ERROR}All session slots in use (max #{SessionTracker.capacity}).#{Colors::RESET}"
