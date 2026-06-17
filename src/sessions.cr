@@ -64,9 +64,9 @@ module Sessions
     [
       "#{home}/.local/bin",
       "#{home}/.nix-profile/bin",
+      "/run/wrappers/bin",
       "/run/current-system/sw/bin",
       "/nix/var/nix/profiles/default/bin",
-      "/run/wrappers/bin",
       "/usr/local/bin",
       "/usr/bin",
       "/bin",
