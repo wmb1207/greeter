@@ -226,8 +226,6 @@ def reap_finished_x11_sessions
     exit_code = (status >> 8) & 0xff
     signal = status & 0x7f
 
-    Sessions.close_pam_session(entry.pamh)
-
     if exited && exit_code == 0
       Logger.info("session.x11.ended", "X11 session ended", {
         username: entry.username, vt: entry.vt, display: entry.display,

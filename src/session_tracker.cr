@@ -9,9 +9,8 @@ module SessionTracker
     getter vt       : Int32
     getter display  : Int32
     getter username : String
-    getter pamh     : LibPAM::PamHandle
 
-    def initialize(@vt, @display, @username, @pamh)
+    def initialize(@vt, @display, @username)
     end
   end
 

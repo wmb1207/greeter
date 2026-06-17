@@ -156,16 +156,6 @@ module Sessions
       LibPAM.pam_putenv(pamh, kv)
     end
 
-    # Register the session with systemd-logind.  This creates /run/user/<uid>,
-    # starts the user's systemd slice (and with it PipeWire/PulseAudio), and
-    # sets up the PAM environment for the session.
-    ret = LibPAM.pam_open_session(pamh, 0)
-    if ret != LibPAM::PAM_SUCCESS
-      Logger.error("session.x11.pam_open_failed", "PAM session could not open", {username: local_env_vars["USER"], uid: pw.pw_uid, pam_code: ret})
-      LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
-      return ActionResult.error("Greeter: pam_open_session failed (#{ret})")
-    end
-
     display = vt - SessionTracker::FIRST_VT
     username = local_env_vars["USER"]
 
@@ -174,17 +164,18 @@ module Sessions
 
     pid = LibC.fork
     if pid == 0
-      do_start_session(pw, env_vars(pamh, pw, vt, seat), startx_cmd, wm_exec, vt, display)
+      supervise_x11_session(pw, pamh, startx_cmd, wm_exec, vt, display, seat)
       exit(1)
     elsif pid < 0
       Logger.error("session.x11.fork_failed", "Could not fork X11 session", {username: username, uid: pw.pw_uid, session: wm_exec})
-      close_pam_session(pamh)
+      LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
       return ActionResult.error("Greeter: fork failed")
     end
 
-    # ── parent: record session and return immediately ────────────────────────
-    # PAM cleanup happens when the greeter reaps this child from normal flow.
-    SessionTracker.add(pid, SessionTracker::Entry.new(vt, display, username, pamh))
+    # ── parent: record supervisor and return immediately ─────────────────────
+    # The supervisor owns pam_open_session/pam_close_session for this login.
+    LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
+    SessionTracker.add(pid, SessionTracker::Entry.new(vt, display, username))
     ActionResult.ok(Action::NO_ACTION)
   end
 
@@ -253,6 +244,41 @@ module Sessions
     return ActionResult.new(value: Action::EXIT_CODE_1, error: "Greeter: Privilege drop failed; session aborted") if drop_privileges(pw).is_error?
     Dir.cd(env["HOME"])
     launch_wm(env, startx_cmd, wm_exec, vt, display)
+  end
+
+  private def self.supervise_x11_session(pw : LibC::Passwd, pamh : LibPAM::PamHandle, startx_cmd : String, wm_exec : String, vt : Int32, display : Int32, seat : String)
+    user = String.new(pw.pw_name)
+
+    # Open PAM/logind in the per-session supervisor, not in the greeter parent.
+    # Otherwise logind associates the first graphical login with the long-lived
+    # greeter process and later users do not get /run/user/<uid>.
+    ret = LibPAM.pam_open_session(pamh, 0)
+    if ret != LibPAM::PAM_SUCCESS
+      Logger.error("session.x11.pam_open_failed", "PAM session could not open", {username: user, uid: pw.pw_uid, pam_code: ret})
+      LibPAM.pam_end(pamh, ret)
+      exit(1)
+    end
+
+    session_env = env_vars(pamh, pw, vt, seat)
+    pid = LibC.fork
+    if pid == 0
+      do_start_session(pw, session_env, startx_cmd, wm_exec, vt, display)
+      exit(1)
+    elsif pid < 0
+      Logger.error("session.x11.fork_failed", "Could not fork X11 session worker", {username: user, uid: pw.pw_uid, session: wm_exec})
+      close_pam_session(pamh)
+      exit(1)
+    end
+
+    raw_status = 0_i32
+    LibC.waitpid(pid, pointerof(raw_status), 0)
+    close_pam_session(pamh)
+
+    if (raw_status & 0x7f) == 0
+      exit((raw_status >> 8) & 0xff)
+    else
+      exit(128 + (raw_status & 0x7f))
+    end
   end
 
   def self.launch_wm(env : Hash(String, String), startx_cmd : String, wm_exec : String, vt : Int32, display : Int32) : ActionResult
