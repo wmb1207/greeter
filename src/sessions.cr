@@ -258,6 +258,7 @@ module Sessions
       LibPAM.pam_end(pamh, ret)
       exit(1)
     end
+    Logger.info("session.x11.pam_opened", "PAM session opened", {username: user, uid: pw.pw_uid, vt: vt, display: display})
 
     session_env = env_vars(pamh, pw, vt, seat)
     pid = LibC.fork
