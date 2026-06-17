@@ -100,6 +100,10 @@ module Sessions
       # runs with a cleared environment, so set it explicitly for audio clients
       # and other user services that need to activate through D-Bus.
       "DBUS_SESSION_BUS_ADDRESS" => "unix:path=/run/user/#{pw.pw_uid}/bus",
+      # Force PulseAudio-compatible clients to use this user's PipeWire-Pulse
+      # socket instead of stale X11 root properties, inherited PAM values, or
+      # legacy ~/.config/pulse runtime links from another login.
+      "PULSE_SERVER" => "unix:/run/user/#{pw.pw_uid}/pulse/native",
       # Tells systemd-logind / D-Bus what kind of session this is.
       "XDG_SESSION_TYPE"  => "x11",
       "XDG_SESSION_CLASS" => "user",
