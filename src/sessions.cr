@@ -174,7 +174,7 @@ module Sessions
       return ActionResult.error("Greeter: fork failed")
     end
 
-    # ── parent: record launcher and return immediately ───────────────────────
+    # ── parent: record session and return immediately ────────────────────────
     # PAM cleanup happens when the greeter reaps this child from normal flow.
     SessionTracker.add(pid, SessionTracker::Entry.new(vt, display, username, pamh))
     ActionResult.ok(Action::NO_ACTION)
@@ -251,10 +251,8 @@ module Sessions
     wm_args = wm_exec.split(' ', remove_empty: true)
     begin
       Process.exec(
-        command: env["SHELL"],
-        args: ["-l", "-c", "exec \"$@\"", "--",
-               "systemd-run", "--user", "--scope", "--collect",
-               "--", startx_cmd] + wm_args + ["--", ":#{display}", "vt#{vt}"],
+        command: startx_cmd,
+        args: wm_args + ["--", ":#{display}", "vt#{vt}"],
         env: env,
         clear_env: true
       )
