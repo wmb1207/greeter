@@ -64,9 +64,9 @@ module Sessions
     [
       "#{home}/.local/bin",
       "#{home}/.nix-profile/bin",
+      "/run/wrappers/bin",
       "/run/current-system/sw/bin",
       "/nix/var/nix/profiles/default/bin",
-      "/run/wrappers/bin",
       "/usr/local/bin",
       "/usr/bin",
       "/bin",
@@ -96,6 +96,14 @@ module Sessions
       # pam_open_session (via pam_systemd) creates this directory;
       # we set it explicitly so the child always has the right value.
       "XDG_RUNTIME_DIR" => "/run/user/#{pw.pw_uid}",
+      # Standard location for the per-user systemd/D-Bus broker.  The session
+      # runs with a cleared environment, so set it explicitly for audio clients
+      # and other user services that need to activate through D-Bus.
+      "DBUS_SESSION_BUS_ADDRESS" => "unix:path=/run/user/#{pw.pw_uid}/bus",
+      # Force PulseAudio-compatible clients to use this user's PipeWire-Pulse
+      # socket instead of stale X11 root properties, inherited PAM values, or
+      # legacy ~/.config/pulse runtime links from another login.
+      "PULSE_SERVER" => "unix:/run/user/#{pw.pw_uid}/pulse/native",
       # Tells systemd-logind / D-Bus what kind of session this is.
       "XDG_SESSION_TYPE"  => "x11",
       "XDG_SESSION_CLASS" => "user",
@@ -112,7 +120,7 @@ module Sessions
     merged
   end
 
-  def self.launch_session(pw : LibC::Passwd, pamh : LibPAM::PamHandle, wm_exec : String, vt : Int32 = 1, seat : String = "seat0") : ActionResult
+  def self.launch_session(pw : LibC::Passwd, pamh : LibPAM::PamHandle, wm_exec : String, vt : Int32, seat : String = "seat0") : ActionResult
     local_env_vars = env_vars(pamh, pw, vt, seat)
     # Build a PATH for the child session.
     # On NixOS, tools like uname/expr/hexdump may only exist in nix store paths
@@ -132,14 +140,14 @@ module Sessions
 
     if startx_cmd.nil?
       Logger.error("session.x11.startx_missing", "startx command not found in session PATH", {username: local_env_vars["USER"], uid: pw.pw_uid})
+      LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
       return ActionResult.error("Greeter: startx command not found in session PATH: #{local_session_path}")
     end
+
     # Tell pam_systemd which TTY and seat/VT this session belongs to.
     # These must be set BEFORE pam_open_session so logind registers the
-    # session as Active=yes on seat0/vt1.  Without this polkit refuses
-    # reboot/shutdown with "interactive authentication required".
-    tty_path_str = LibC.ttyname(STDIN.fd)
-    tty_str = tty_path_str.null? ? TTY1 : String.new(tty_path_str)
+    # session as Active=yes on the correct seat/VT.
+    tty_str = "/dev/tty#{vt}"
     tty_str.to_unsafe.as(Void*).tap do |ptr|
       LibPAM.pam_set_item(pamh, LibPAM::PAM_TTY, ptr)
     end
@@ -148,44 +156,26 @@ module Sessions
       LibPAM.pam_putenv(pamh, kv)
     end
 
-    # Register the session with systemd-logind.  This creates /run/user/<uid>,
-    # starts the user's systemd slice (and with it PipeWire/PulseAudio), and
-    # sets up the PAM environment for the session.  Without this call there is
-    # no audio because the audio server never starts.
-    ret = LibPAM.pam_open_session(pamh, 0)
-    if ret != LibPAM::PAM_SUCCESS
-      Logger.error("session.x11.pam_open_failed", "PAM session could not open", {username: local_env_vars["USER"], uid: pw.pw_uid, pam_code: ret})
-      return ActionResult.error("Greeter: pam_open_session failed (#{ret}) — audio may be unavailable")
-    end
+    display = vt - SessionTracker::FIRST_VT
+    username = local_env_vars["USER"]
 
-    Logger.info("session.x11.starting", "Starting X11 session", {username: local_env_vars["USER"], uid: pw.pw_uid, session: wm_exec})
-    puts "Starting #{wm_exec.split.first} session for #{local_env_vars["USER"]}..."
+    Logger.info("session.x11.starting", "Starting X11 session", {username: username, uid: pw.pw_uid, session: wm_exec, vt: vt, display: display})
+    puts "Launching #{wm_exec.split.first} on :#{display} (vt#{vt}) for #{username}..."
 
     pid = LibC.fork
     if pid == 0
-      sessionResult = do_start_session(pw, env_vars(pamh, pw, vt, seat), startx_cmd, wm_exec)
-      return sessionResult if sessionResult.is_error?
+      supervise_x11_session(pw, pamh, startx_cmd, wm_exec, vt, display, seat)
+      exit(1)
     elsif pid < 0
-      Logger.error("session.x11.fork_failed", "Could not fork X11 session", {username: local_env_vars["USER"], uid: pw.pw_uid, session: wm_exec})
-      LibPAM.pam_close_session(pamh, 0)
+      Logger.error("session.x11.fork_failed", "Could not fork X11 session", {username: username, uid: pw.pw_uid, session: wm_exec})
       LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
-      return ActionResult.new(value: Action::NO_ACTION, error: "Greeter: fork failed")
+      return ActionResult.error("Greeter: fork failed")
     end
 
-    # ── parent — wait for the X session to exit ─────────────────────────────
-    raw_status = 0_i32
-    LibC.waitpid(pid, pointerof(raw_status), 0)
-    exited = (raw_status & 0x7f) == 0
-    exit_code = (raw_status >> 8) & 0xff
-    if exited && exit_code == 0
-      Logger.info("session.x11.ended", "X11 session ended", {username: local_env_vars["USER"], uid: pw.pw_uid, session: wm_exec, exit_code: exit_code})
-      puts "Session ended normally."
-    else
-      Logger.warn("session.x11.ended", "X11 session exited abnormally", {username: local_env_vars["USER"], uid: pw.pw_uid, session: wm_exec, exit_code: exit_code})
-      puts "Session exited (code #{exit_code})."
-    end
-
-    close_pam_session(pamh)
+    # ── parent: record supervisor and return immediately ─────────────────────
+    # The supervisor owns pam_open_session/pam_close_session for this login.
+    LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
+    SessionTracker.add(pid, SessionTracker::Entry.new(vt, display, username))
     ActionResult.ok(Action::NO_ACTION)
   end
 
@@ -248,27 +238,63 @@ module Sessions
     BooleanResult.ok(true)
   end
 
-  private def self.do_start_session(pw : LibC::Passwd, env : Hash(String, String), startx_cmd : String, wm_exec : String) : ActionResult
-    tty_path = LibC.ttyname(STDIN.fd)
-    unless tty_path.null?
-      LibC.chown(tty_path, pw.pw_uid, pw.pw_gid)
-    end
+  private def self.do_start_session(pw : LibC::Passwd, env : Hash(String, String), startx_cmd : String, wm_exec : String, vt : Int32, display : Int32) : ActionResult
+    LibC.chown("/dev/tty#{vt}", pw.pw_uid, pw.pw_gid)
 
     return ActionResult.new(value: Action::EXIT_CODE_1, error: "Greeter: Privilege drop failed; session aborted") if drop_privileges(pw).is_error?
     Dir.cd(env["HOME"])
-    result = launch_wm(env, startx_cmd, wm_exec)
-    return result if result.is_error?
-    ActionResult.ok(Action::NO_ACTION)
+    launch_wm(env, startx_cmd, wm_exec, vt, display)
   end
 
-  def self.launch_wm(env : Hash(String, String), startx_cmd : String, wm_exec : String) : ActionResult
-    wm_args = wm_exec.split(' ', remove_empty: true)
+  private def self.supervise_x11_session(pw : LibC::Passwd, pamh : LibPAM::PamHandle, startx_cmd : String, wm_exec : String, vt : Int32, display : Int32, seat : String)
+    user = String.new(pw.pw_name)
+
+    # Open PAM/logind in the per-session supervisor, not in the greeter parent.
+    # Otherwise logind associates the first graphical login with the long-lived
+    # greeter process and later users do not get /run/user/<uid>.
+    ret = LibPAM.pam_open_session(pamh, 0)
+    if ret != LibPAM::PAM_SUCCESS
+      Logger.error("session.x11.pam_open_failed", "PAM session could not open", {username: user, uid: pw.pw_uid, pam_code: ret})
+      LibPAM.pam_end(pamh, ret)
+      exit(1)
+    end
+    Logger.info("session.x11.pam_opened", "PAM session opened", {username: user, uid: pw.pw_uid, vt: vt, display: display})
+
+    session_env = env_vars(pamh, pw, vt, seat)
+    pid = LibC.fork
+    if pid == 0
+      do_start_session(pw, session_env, startx_cmd, wm_exec, vt, display)
+      exit(1)
+    elsif pid < 0
+      Logger.error("session.x11.fork_failed", "Could not fork X11 session worker", {username: user, uid: pw.pw_uid, session: wm_exec})
+      close_pam_session(pamh)
+      exit(1)
+    end
+
+    raw_status = 0_i32
+    LibC.waitpid(pid, pointerof(raw_status), 0)
+    close_pam_session(pamh)
+
+    if (raw_status & 0x7f) == 0
+      exit((raw_status >> 8) & 0xff)
+    else
+      exit(128 + (raw_status & 0x7f))
+    end
+  end
+
+  def self.launch_wm(env : Hash(String, String), startx_cmd : String, wm_exec : String, vt : Int32, display : Int32) : ActionResult
+    # Prefer ~/.xsession (generated by home-manager) so that user-session
+    # systemd targets (hm-graphical-session.target) are started correctly.
+    # Fall back to wm_exec when no .xsession is present.
+    home = env["HOME"]?
+    xsession = home ? "#{home}/.xsession" : nil
+    client = (xsession && File.executable?(xsession)) ? xsession : wm_exec
+
+    wm_args = client.split(' ', remove_empty: true)
     begin
       Process.exec(
-        command: env["SHELL"],
-        args: ["-l", "-c", "exec \"$@\"", "--",
-               "systemd-run", "--user", "--scope", "--collect",
-               "--", startx_cmd] + wm_args + ["--", ":0", "vt1"],
+        command: startx_cmd,
+        args: wm_args + ["--", ":#{display}", "vt#{vt}"],
         env: env,
         clear_env: true
       )
