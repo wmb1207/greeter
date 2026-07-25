@@ -2,9 +2,10 @@ require "./result"
 require "./libs"
 require "./action"
 require "./logger"
+require "./platform"
 
 module Sessions
-  TTY1 = "/dev/tty1"
+  TTY1 = Platform.tty_path(1)
 
   alias ActionResult = Result(Action)
   alias BooleanResult = Result(Bool)
@@ -61,16 +62,7 @@ module Sessions
   end
 
   def self.session_path(home : String) : String
-    [
-      "#{home}/.local/bin",
-      "#{home}/.nix-profile/bin",
-      "/run/wrappers/bin",
-      "/run/current-system/sw/bin",
-      "/nix/var/nix/profiles/default/bin",
-      "/usr/local/bin",
-      "/usr/bin",
-      "/bin",
-    ].join(":")
+    Platform.session_path(home, File.basename(home))
   end
 
   def self.close_pam_session(pamh : LibPAM::PamHandle)
@@ -95,7 +87,7 @@ module Sessions
       # Required by PipeWire / PulseAudio to locate their socket.
       # pam_open_session (via pam_systemd) creates this directory;
       # we set it explicitly so the child always has the right value.
-      "XDG_RUNTIME_DIR" => "/run/user/#{pw.pw_uid}",
+      "XDG_RUNTIME_DIR" => Platform.runtime_dir(pw.pw_uid),
       # Standard location for the per-user systemd/D-Bus broker.  The session
       # runs with a cleared environment, so set it explicitly for audio clients
       # and other user services that need to activate through D-Bus.
@@ -147,7 +139,7 @@ module Sessions
     # Tell pam_systemd which TTY and seat/VT this session belongs to.
     # These must be set BEFORE pam_open_session so logind registers the
     # session as Active=yes on the correct seat/VT.
-    tty_str = "/dev/tty#{vt}"
+    tty_str = Platform.tty_path(vt)
     tty_str.to_unsafe.as(Void*).tap do |ptr|
       LibPAM.pam_set_item(pamh, LibPAM::PAM_TTY, ptr)
     end
@@ -224,6 +216,7 @@ module Sessions
   end
 
   private def self.do_start_ssh_session(pw : LibC::Passwd, env : Hash(String, String), ssh_cmd : String, host : String) : ActionResult
+    Platform.ensure_runtime_dir(pw.pw_uid, pw.pw_gid)
     return ActionResult.new(value: Action::EXIT_CODE_1, error: "Greeter: Privilege drop pfailed; session aborted") if drop_privileges(pw).is_error?
     Dir.cd(env["HOME"])
     sshResult = ssh(env, ssh_cmd, env["USER"], host)
@@ -239,7 +232,8 @@ module Sessions
   end
 
   private def self.do_start_session(pw : LibC::Passwd, env : Hash(String, String), startx_cmd : String, wm_exec : String, vt : Int32, display : Int32) : ActionResult
-    LibC.chown("/dev/tty#{vt}", pw.pw_uid, pw.pw_gid)
+    LibC.chown(Platform.tty_path(vt), pw.pw_uid, pw.pw_gid)
+    Platform.ensure_runtime_dir(pw.pw_uid, pw.pw_gid)
 
     return ActionResult.new(value: Action::EXIT_CODE_1, error: "Greeter: Privilege drop failed; session aborted") if drop_privileges(pw).is_error?
     Dir.cd(env["HOME"])
@@ -288,7 +282,7 @@ module Sessions
     # Fall back to wm_exec when no .xsession is present.
     home = env["HOME"]?
     xsession = home ? "#{home}/.xsession" : nil
-    client = (xsession && File.executable?(xsession)) ? xsession : wm_exec
+    client = (xsession && File::Info.executable?(xsession)) ? xsession : wm_exec
 
     wm_args = client.split(' ', remove_empty: true)
     begin
@@ -314,7 +308,7 @@ module Sessions
           "USER"  => env["USER"],
           "SHELL" => env["SHELL"],
           "PATH"  => session_path(env["HOME"]),
-          "TERM"  => ENV["TERM"]? || "linux",
+          "TERM"  => ENV["TERM"]? || Platform.term,
         },
         clear_env: true
       )

@@ -1,5 +1,6 @@
 require "yaml"
 require "./logger"
+require "./platform"
 
 CONFIG_PATH = "/etc/greeter.conf"
 
@@ -27,10 +28,7 @@ struct Config
   )
   end
 
-  DEFAULT_XSESSION_DIRS = [
-    "/usr/share/xsessions",
-    "/run/current-system/sw/share/xsessions",
-  ]
+  DEFAULT_XSESSION_DIRS = Platform.default_xsession_dirs
 
   DEFAULT_MENU = [
     MenuEntry.new(MenuAction::Exit, "exit"),

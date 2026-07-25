@@ -19,6 +19,7 @@ require "./session_tracker"
 require "./action"
 require "./config"
 require "./logger"
+require "./platform"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # User lookup
@@ -78,17 +79,7 @@ def launch_moonlight(pw : LibC::Passwd, pamh : LibPAM::PamHandle, host : String)
   home = String.new(pw.pw_dir)
   shell = String.new(pw.pw_shell)
 
-  session_path = [
-    "#{home}/.local/bin",
-    "#{home}/.nix-profile/bin",
-    "/nix/var/nix/profiles/per-user/#{user}/bin",
-    "/run/current-system/sw/bin",
-    "/nix/var/nix/profiles/default/bin",
-    "/run/wrappers/bin",
-    "/usr/local/bin",
-    "/usr/bin",
-    "/bin",
-  ].join(":")
+  session_path = Platform.session_path(home, user)
 
   moonlight_cmd = session_path.split(":")
     .flat_map { |d| ["#{d}/moonlight", "#{d}/moonlight-qt"] }
@@ -101,7 +92,7 @@ def launch_moonlight(pw : LibC::Passwd, pamh : LibPAM::PamHandle, host : String)
   Logger.debug("session.moonlight.command_resolved", "Resolved moonlight command", {username: user, uid: pw.pw_uid, command: moonlight_cmd})
 
   tty_path_str = LibC.ttyname(STDIN.fd)
-  tty_str = tty_path_str.null? ? "/dev/tty1" : String.new(tty_path_str)
+  tty_str = tty_path_str.null? ? Platform.tty_path(1) : String.new(tty_path_str)
   tty_str.to_unsafe.as(Void*).tap do |ptr|
     LibPAM.pam_set_item(pamh, LibPAM::PAM_TTY, ptr)
   end
@@ -133,7 +124,7 @@ def launch_moonlight(pw : LibC::Passwd, pamh : LibPAM::PamHandle, host : String)
     "SHELL"            => shell,
     "LOGNAME"          => user,
     "PATH"             => session_path,
-    "XDG_RUNTIME_DIR"  => "/run/user/#{pw.pw_uid}",
+    "XDG_RUNTIME_DIR"  => Platform.runtime_dir(pw.pw_uid),
     "XDG_SESSION_TYPE" => "x11",
     "XDG_SEAT"         => "seat0",
     "XDG_VTNR"         => "1",
@@ -197,11 +188,13 @@ end
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def do_reboot
-  puts "  [stub] reboot — would exec: systemctl reboot"
+  command, args = Platform.reboot_command
+  Process.exec(command, args)
 end
 
 def do_shutdown
-  puts "  [stub] shutdown — would exec: systemctl poweroff"
+  command, args = Platform.shutdown_command
+  Process.exec(command, args)
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════
