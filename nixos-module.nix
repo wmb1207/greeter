@@ -11,6 +11,7 @@ let
     vt            = cfg.vt;
     seat          = cfg.seat;
     xsession_dirs = cfg.xsessionDirs;
+    wayland_session_dirs = cfg.waylandSessionDirs;
     menu          = map
       (e: lib.filterAttrs (_: v: v != null) {
         action = e.action;
@@ -61,6 +62,15 @@ in
       description = "Directories scanned for .desktop X session files.";
     };
 
+    waylandSessionDirs = lib.mkOption {
+      type        = lib.types.listOf lib.types.str;
+      default     = [
+        "/run/current-system/sw/share/wayland-sessions"
+        "/usr/share/wayland-sessions"
+      ];
+      description = "Directories scanned for .desktop Wayland session files.";
+    };
+
     menu = lib.mkOption {
       description = "Static menu entries shown after discovered X sessions.";
       default = [
@@ -99,7 +109,7 @@ in
 
     # Make sure xsession .desktop files from installed WMs are linked
     # into /run/current-system/sw/share/xsessions/
-    environment.pathsToLink = [ "/share/xsessions" ];
+    environment.pathsToLink = [ "/share/xsessions" "/share/wayland-sessions" ];
 
     # Install as a setuid-root wrapper (required for PAM + privilege drop)
     security.wrappers.crystal-greeter = {

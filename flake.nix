@@ -34,7 +34,7 @@
         '';
 
         meta = with pkgs.lib; {
-          description = "Minimal TTY login greeter in Crystal (PAM + fvwm3)";
+          description = "Minimal TTY login greeter in Crystal (PAM + X11/Wayland sessions)";
           license     = licenses.mit;
           platforms   = [ "x86_64-linux" ];
           mainProgram = "crystal-greeter";
@@ -96,6 +96,8 @@
             # greeter scans for sessions.
             environment.systemPackages = with pkgs; [
               fvwm3
+              niri
+              xwayland-satellite
               openbox
               xinit
               xorg-server

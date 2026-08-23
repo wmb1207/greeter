@@ -26,6 +26,17 @@ module Platform
     dirs
   end
 
+  def self.default_wayland_session_dirs : Array(String)
+    dirs = [
+      "/usr/local/share/wayland-sessions",
+      "/usr/share/wayland-sessions",
+    ]
+    dirs.concat([
+      "/run/current-system/sw/share/wayland-sessions",
+    ]) if linux?
+    dirs
+  end
+
   def self.session_path(home : String, user : String = File.basename(home)) : String
     paths = [
       "#{home}/.local/bin",

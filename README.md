@@ -18,12 +18,13 @@ root throughout — only the child drops to the user's UID/GID before exec.
 ## Session menu
 
 The menu is config-driven (see [Configuration](#configuration) below).
-X sessions are discovered automatically from `.desktop` files.
+X and Wayland sessions are discovered automatically from `.desktop` files.
 Static entries follow — by default:
 
 | Entry | Action |
 |-------|--------|
 | (discovered xsessions) | X11 session via startx |
+| (discovered wayland-sessions) | Wayland session executed directly on the greeter VT |
 | exit | Exit greeter |
 | reboot | `systemctl reboot` |
 | shutdown | `systemctl poweroff` |
@@ -43,6 +44,10 @@ seat: seat0
 xsession_dirs:
   - /run/current-system/sw/share/xsessions
   - /usr/share/xsessions
+
+wayland_session_dirs:
+  - /run/current-system/sw/share/wayland-sessions
+  - /usr/share/wayland-sessions
 
 menu:
   - action: exit
@@ -78,6 +83,7 @@ src/
 - Linux with PAM (`linux-pam`)
 - NixOS (uses nix store paths for `coreutils`, `util-linux`, `xinit`)
 - `startx` + `fvwm3` for X sessions
+- a Wayland compositor with a `.desktop` file, such as `niri`
 - `systemd` (session registered via `systemd-run --user --scope`)
 
 ## Build

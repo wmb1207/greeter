@@ -16,19 +16,24 @@ record MenuEntry, action : MenuAction, label : String, host : String? = nil
 
 struct Config
   getter title : String
+  getter vt : Int32
   getter seat : String
   getter xsession_dirs : Array(String)
+  getter wayland_session_dirs : Array(String)
   getter menu : Array(MenuEntry)
 
   def initialize(
     @title = "Greeter",
+    @vt = 1,
     @seat = "seat0",
     @xsession_dirs = DEFAULT_XSESSION_DIRS.dup,
+    @wayland_session_dirs = DEFAULT_WAYLAND_SESSION_DIRS.dup,
     @menu = DEFAULT_MENU.dup
   )
   end
 
   DEFAULT_XSESSION_DIRS = Platform.default_xsession_dirs
+  DEFAULT_WAYLAND_SESSION_DIRS = Platform.default_wayland_session_dirs
 
   DEFAULT_MENU = [
     MenuEntry.new(MenuAction::Exit, "exit"),
@@ -48,13 +53,15 @@ struct Config
 
   private def self.parse(doc : YAML::Any) : Config
     title = doc["title"]?.try(&.as_s) || "Greeter"
+    vt    = doc["vt"]?.try(&.as_i) || 1
     seat  = doc["seat"]?.try(&.as_s) || "seat0"
 
     xsession_dirs = doc["xsession_dirs"]?.try(&.as_a.map(&.as_s)) || DEFAULT_XSESSION_DIRS.dup
+    wayland_session_dirs = doc["wayland_session_dirs"]?.try(&.as_a.map(&.as_s)) || DEFAULT_WAYLAND_SESSION_DIRS.dup
 
     menu = doc["menu"]?.try(&.as_a.compact_map { |e| parse_menu_entry(e) }) || DEFAULT_MENU.dup
 
-    new(title: title, seat: seat, xsession_dirs: xsession_dirs, menu: menu)
+    new(title: title, vt: vt, seat: seat, xsession_dirs: xsession_dirs, wayland_session_dirs: wayland_session_dirs, menu: menu)
   end
 
   private def self.parse_menu_entry(entry : YAML::Any) : MenuEntry?
