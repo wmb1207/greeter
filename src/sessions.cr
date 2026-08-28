@@ -2,38 +2,58 @@ require "./result"
 require "./libs"
 require "./action"
 require "./logger"
+require "./platform"
 
 module Sessions
-  TTY1 = "/dev/tty1"
+  TTY1 = Platform.tty_path(1)
 
   alias ActionResult = Result(Action)
   alias BooleanResult = Result(Bool)
 
-  struct XSession
+  enum SessionType
+    X11
+    Wayland
+  end
+
+  struct DesktopSession
     getter name : String
     getter exec : String
+    getter session_type : SessionType
 
-    def initialize(@name, @exec)
+    def initialize(@name, @exec, @session_type)
+    end
+
+    def label : String
+      suffix = case @session_type
+               in .x11?     then "X11"
+               in .wayland? then "Wayland"
+               end
+      "#{@name} (#{suffix})"
     end
   end
 
-  def self.available_sessions(dirs : Array(String)) : Array(XSession)
-    sessions = [] of XSession
+  def self.available_sessions(xsession_dirs : Array(String), wayland_session_dirs : Array(String)) : Array(DesktopSession)
+    sessions = [] of DesktopSession
     seen = Set(String).new
 
+    add_sessions(sessions, seen, xsession_dirs, SessionType::X11)
+    add_sessions(sessions, seen, wayland_session_dirs, SessionType::Wayland)
+
+    sessions.sort_by { |session| {session.name, session.session_type.to_s} }
+  end
+
+  private def self.add_sessions(sessions : Array(DesktopSession), seen : Set(String), dirs : Array(String), session_type : SessionType)
     dirs.each do |dir|
       Dir.glob("#{dir}/*.desktop").sort.each do |path|
         next if seen.includes?(path)
         seen.add(path)
-        s = parse_desktop_file(path)
+        s = parse_desktop_file(path, session_type)
         sessions << s if s
       end
     end
-
-    sessions.sort_by(&.name)
   end
 
-  private def self.parse_desktop_file(path : String) : XSession?
+  private def self.parse_desktop_file(path : String, session_type : SessionType) : DesktopSession?
     name = nil
     exec_val = nil
     in_entry = false
@@ -55,22 +75,13 @@ module Sessions
     end
 
     return nil unless name && exec_val
-    XSession.new(name.not_nil!, exec_val.not_nil!)
+    DesktopSession.new(name.not_nil!, exec_val.not_nil!, session_type)
   rescue
     nil
   end
 
   def self.session_path(home : String) : String
-    [
-      "#{home}/.local/bin",
-      "#{home}/.nix-profile/bin",
-      "/run/wrappers/bin",
-      "/run/current-system/sw/bin",
-      "/nix/var/nix/profiles/default/bin",
-      "/usr/local/bin",
-      "/usr/bin",
-      "/bin",
-    ].join(":")
+    Platform.session_path(home, File.basename(home))
   end
 
   def self.close_pam_session(pamh : LibPAM::PamHandle)
@@ -80,7 +91,7 @@ module Sessions
     LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
   end
 
-  def self.env_vars(pamh : LibPAM::PamHandle, pw : LibC::Passwd, vt : Int32 = 1, seat : String = "seat0")
+  def self.env_vars(pamh : LibPAM::PamHandle, pw : LibC::Passwd, vt : Int32 = 1, seat : String = "seat0", session_type : String = "x11")
     user = String.new(pw.pw_name)
     home = String.new(pw.pw_dir)
     shell = String.new(pw.pw_shell)
@@ -95,7 +106,7 @@ module Sessions
       # Required by PipeWire / PulseAudio to locate their socket.
       # pam_open_session (via pam_systemd) creates this directory;
       # we set it explicitly so the child always has the right value.
-      "XDG_RUNTIME_DIR" => "/run/user/#{pw.pw_uid}",
+      "XDG_RUNTIME_DIR" => Platform.runtime_dir(pw.pw_uid),
       # Standard location for the per-user systemd/D-Bus broker.  The session
       # runs with a cleared environment, so set it explicitly for audio clients
       # and other user services that need to activate through D-Bus.
@@ -105,7 +116,7 @@ module Sessions
       # legacy ~/.config/pulse runtime links from another login.
       "PULSE_SERVER" => "unix:/run/user/#{pw.pw_uid}/pulse/native",
       # Tells systemd-logind / D-Bus what kind of session this is.
-      "XDG_SESSION_TYPE"  => "x11",
+      "XDG_SESSION_TYPE"  => session_type,
       "XDG_SESSION_CLASS" => "user",
       "XDG_SEAT"          => seat,
       "XDG_VTNR"          => vt.to_s,
@@ -147,7 +158,7 @@ module Sessions
     # Tell pam_systemd which TTY and seat/VT this session belongs to.
     # These must be set BEFORE pam_open_session so logind registers the
     # session as Active=yes on the correct seat/VT.
-    tty_str = "/dev/tty#{vt}"
+    tty_str = Platform.tty_path(vt)
     tty_str.to_unsafe.as(Void*).tap do |ptr|
       LibPAM.pam_set_item(pamh, LibPAM::PAM_TTY, ptr)
     end
@@ -177,6 +188,94 @@ module Sessions
     LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
     SessionTracker.add(pid, SessionTracker::Entry.new(vt, display, username))
     ActionResult.ok(Action::NO_ACTION)
+  end
+
+  def self.launch_wayland_session(pw : LibC::Passwd, pamh : LibPAM::PamHandle, session_exec : String, vt : Int32, seat : String = "seat0") : ActionResult
+    local_env_vars = env_vars(pamh, pw, vt, seat, "wayland")
+    username = local_env_vars["USER"]
+    args = session_exec.split(' ', remove_empty: true)
+    if args.empty?
+      LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
+      return ActionResult.error("Greeter: empty Wayland session command")
+    end
+
+    command = resolve_command(args.first, local_env_vars["PATH"])
+    if command.nil?
+      Logger.error("session.wayland.command_missing", "Wayland session command not found", {username: username, uid: pw.pw_uid, session: session_exec})
+      LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
+      return ActionResult.error("Greeter: Wayland command not found: #{args.first}")
+    end
+
+    tty_str = Platform.tty_path(vt)
+    tty_str.to_unsafe.as(Void*).tap do |ptr|
+      LibPAM.pam_set_item(pamh, LibPAM::PAM_TTY, ptr)
+    end
+    ["XDG_SESSION_TYPE=wayland", "XDG_SESSION_CLASS=user",
+     "XDG_SEAT=#{seat}", "XDG_VTNR=#{vt}"].each do |kv|
+      LibPAM.pam_putenv(pamh, kv)
+    end
+
+    ret = LibPAM.pam_open_session(pamh, 0)
+    if ret != LibPAM::PAM_SUCCESS
+      Logger.error("session.wayland.pam_open_failed", "PAM session could not open", {username: username, uid: pw.pw_uid, pam_code: ret})
+      LibPAM.pam_end(pamh, ret)
+      return ActionResult.error("Greeter: PAM session could not open")
+    end
+
+    Logger.info("session.wayland.starting", "Starting Wayland session", {username: username, uid: pw.pw_uid, session: session_exec, vt: vt})
+    puts "Launching #{args.first} on vt#{vt} for #{username}..."
+
+    pid = LibC.fork
+    if pid == 0
+      do_start_wayland_session(pw, env_vars(pamh, pw, vt, seat, "wayland"), command, args, vt)
+      exit(1)
+    elsif pid < 0
+      Logger.error("session.wayland.fork_failed", "Could not fork Wayland session", {username: username, uid: pw.pw_uid, session: session_exec})
+      close_pam_session(pamh)
+      return ActionResult.error("Greeter: fork failed")
+    end
+
+    raw_status = 0_i32
+    LibC.waitpid(pid, pointerof(raw_status), 0)
+    close_pam_session(pamh)
+
+    exited = (raw_status & 0x7f) == 0
+    exit_code = (raw_status >> 8) & 0xff
+    if exited && exit_code == 0
+      Logger.info("session.wayland.ended", "Wayland session ended", {username: username, uid: pw.pw_uid, session: session_exec, exit_code: exit_code})
+    else
+      Logger.warn("session.wayland.ended", "Wayland session exited abnormally", {username: username, uid: pw.pw_uid, session: session_exec, exit_code: exit_code})
+    end
+    sleep 1.second
+    ActionResult.ok(Action::NO_ACTION)
+  end
+
+  private def self.resolve_command(command : String, path : String) : String?
+    return command if command.includes?('/') && File::Info.executable?(command)
+
+    path.split(":").reject(&.empty?)
+      .map { |d| "#{d}/#{command}" }
+      .find { |p| File::Info.executable?(p) }
+  end
+
+  private def self.do_start_wayland_session(pw : LibC::Passwd, env : Hash(String, String), command : String, args : Array(String), vt : Int32) : ActionResult
+    LibC.chown(Platform.tty_path(vt), pw.pw_uid, pw.pw_gid)
+    Platform.ensure_runtime_dir(pw.pw_uid, pw.pw_gid)
+
+    return ActionResult.new(value: Action::EXIT_CODE_1, error: "Greeter: Privilege drop failed; session aborted") if drop_privileges(pw).is_error?
+    Dir.cd(env["HOME"])
+
+    begin
+      Process.exec(
+        command: command,
+        args: args[1..],
+        env: env,
+        clear_env: true
+      )
+      ActionResult.ok(Action::NO_ACTION)
+    rescue ex
+      ActionResult.new(Action::EXIT_CODE_1, error: "Greeter: exec failed: #{ex.message}")
+    end
   end
 
   # ═══════════════════════════════════════════════════════════════════════════════
@@ -224,6 +323,7 @@ module Sessions
   end
 
   private def self.do_start_ssh_session(pw : LibC::Passwd, env : Hash(String, String), ssh_cmd : String, host : String) : ActionResult
+    Platform.ensure_runtime_dir(pw.pw_uid, pw.pw_gid)
     return ActionResult.new(value: Action::EXIT_CODE_1, error: "Greeter: Privilege drop pfailed; session aborted") if drop_privileges(pw).is_error?
     Dir.cd(env["HOME"])
     sshResult = ssh(env, ssh_cmd, env["USER"], host)
@@ -239,7 +339,8 @@ module Sessions
   end
 
   private def self.do_start_session(pw : LibC::Passwd, env : Hash(String, String), startx_cmd : String, wm_exec : String, vt : Int32, display : Int32) : ActionResult
-    LibC.chown("/dev/tty#{vt}", pw.pw_uid, pw.pw_gid)
+    LibC.chown(Platform.tty_path(vt), pw.pw_uid, pw.pw_gid)
+    Platform.ensure_runtime_dir(pw.pw_uid, pw.pw_gid)
 
     return ActionResult.new(value: Action::EXIT_CODE_1, error: "Greeter: Privilege drop failed; session aborted") if drop_privileges(pw).is_error?
     Dir.cd(env["HOME"])
@@ -288,7 +389,7 @@ module Sessions
     # Fall back to wm_exec when no .xsession is present.
     home = env["HOME"]?
     xsession = home ? "#{home}/.xsession" : nil
-    client = (xsession && File.executable?(xsession)) ? xsession : wm_exec
+    client = (xsession && File::Info.executable?(xsession)) ? xsession : wm_exec
 
     wm_args = client.split(' ', remove_empty: true)
     begin
@@ -314,7 +415,7 @@ module Sessions
           "USER"  => env["USER"],
           "SHELL" => env["SHELL"],
           "PATH"  => session_path(env["HOME"]),
-          "TERM"  => ENV["TERM"]? || "linux",
+          "TERM"  => ENV["TERM"]? || Platform.term,
         },
         clear_env: true
       )

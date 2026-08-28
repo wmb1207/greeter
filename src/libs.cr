@@ -108,6 +108,7 @@ lib LibC
 
   # TIOCGWINSZ ioctl: query terminal window size.
   TIOCGWINSZ = 0x5413_u64
+  VTIME      =          5
 
   struct Winsize
     ws_row : UInt16

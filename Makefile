@@ -9,7 +9,7 @@ debug:
 	crystal build src/greeter.cr -o greeter
 
 spec:
-	crystal spec spec/logger_spec.cr
+	crystal spec
 
 # Install setuid-root so the binary can call PAM, setuid, setgid
 install: build

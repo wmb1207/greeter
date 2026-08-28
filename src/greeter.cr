@@ -19,6 +19,8 @@ require "./session_tracker"
 require "./action"
 require "./config"
 require "./logger"
+require "./platform"
+require "./keyboard_layout"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # User lookup
@@ -78,17 +80,7 @@ def launch_moonlight(pw : LibC::Passwd, pamh : LibPAM::PamHandle, host : String)
   home = String.new(pw.pw_dir)
   shell = String.new(pw.pw_shell)
 
-  session_path = [
-    "#{home}/.local/bin",
-    "#{home}/.nix-profile/bin",
-    "/nix/var/nix/profiles/per-user/#{user}/bin",
-    "/run/current-system/sw/bin",
-    "/nix/var/nix/profiles/default/bin",
-    "/run/wrappers/bin",
-    "/usr/local/bin",
-    "/usr/bin",
-    "/bin",
-  ].join(":")
+  session_path = Platform.session_path(home, user)
 
   moonlight_cmd = session_path.split(":")
     .flat_map { |d| ["#{d}/moonlight", "#{d}/moonlight-qt"] }
@@ -101,7 +93,7 @@ def launch_moonlight(pw : LibC::Passwd, pamh : LibPAM::PamHandle, host : String)
   Logger.debug("session.moonlight.command_resolved", "Resolved moonlight command", {username: user, uid: pw.pw_uid, command: moonlight_cmd})
 
   tty_path_str = LibC.ttyname(STDIN.fd)
-  tty_str = tty_path_str.null? ? "/dev/tty1" : String.new(tty_path_str)
+  tty_str = tty_path_str.null? ? Platform.tty_path(1) : String.new(tty_path_str)
   tty_str.to_unsafe.as(Void*).tap do |ptr|
     LibPAM.pam_set_item(pamh, LibPAM::PAM_TTY, ptr)
   end
@@ -133,7 +125,7 @@ def launch_moonlight(pw : LibC::Passwd, pamh : LibPAM::PamHandle, host : String)
     "SHELL"            => shell,
     "LOGNAME"          => user,
     "PATH"             => session_path,
-    "XDG_RUNTIME_DIR"  => "/run/user/#{pw.pw_uid}",
+    "XDG_RUNTIME_DIR"  => Platform.runtime_dir(pw.pw_uid),
     "XDG_SESSION_TYPE" => "x11",
     "XDG_SEAT"         => "seat0",
     "XDG_VTNR"         => "1",
@@ -197,11 +189,13 @@ end
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def do_reboot
-  puts "  [stub] reboot — would exec: systemctl reboot"
+  command, args = Platform.reboot_command
+  Process.exec(command, args)
 end
 
 def do_shutdown
-  puts "  [stub] shutdown — would exec: systemctl poweroff"
+  command, args = Platform.shutdown_command
+  Process.exec(command, args)
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -247,6 +241,7 @@ end
 
 class Greeter
   def initialize(@config : Config)
+    @keyboard_layout = @config.default_keyboard_layout
   end
 
   def run
@@ -261,6 +256,7 @@ class Greeter
     _, cols = Terminal.term_size
     bar_col = [cols // 5, 4].max
     panel_width = bar_col - 1 # usable columns in the left panel
+    Terminal.apply_keymap_feedback(@keyboard_layout, panel_width)
 
     # ── header box (scales to panel width) ────────────────────────────────────
     inner = [panel_width - 2, 1].max
@@ -277,10 +273,11 @@ class Greeter
     # ── flush stale input before prompting ────────────────────────────────────
     LibC.tcflush(STDIN.fd, LibC::TCIFLUSH)
 
-    creds_result = Terminal.read_auth_inputs
+    Terminal.draw_keyboard_layout(@keyboard_layout, panel_width)
+    creds_result = Terminal.read_auth_inputs(@keyboard_layout, panel_width)
     return Action::NEXT_ITER unless creds_result.is_ok?
 
-    username, password = creds_result.value.not_nil!
+    username, password, @keyboard_layout = creds_result.value.not_nil!
     authenticated_result = Auth.auth(Auth::Credentials.new(
       username: username,
       password: password
@@ -305,45 +302,58 @@ class Greeter
 
   private def menu(panel_width : Int, authenticated : Auth::LoginSession)
     # ── session menu ──────────────────────────────────────────────────────────
-    wm_sessions = Sessions.available_sessions(@config.xsession_dirs)
+    wm_sessions = Sessions.available_sessions(@config.xsession_dirs, @config.wayland_session_dirs)
     config_entries = @config.menu
 
-    all_labels = wm_sessions.map(&.name) + config_entries.map(&.label)
+    all_labels = wm_sessions.map(&.label) + config_entries.map(&.label)
     all_labels.each_with_index do |label, i|
-      num   = "#{Colors::NUMBER}#{i + 1})#{Colors::RESET}"
-      lbl   = "#{Colors::ITEM}#{label}#{Colors::RESET}"
+      num = "#{Colors::NUMBER}#{i + 1})#{Colors::RESET}"
+      lbl = "#{Colors::ITEM}#{label}#{Colors::RESET}"
       plain = "#{i + 1}) #{label}"
-      pad   = " " * [panel_width - plain.size, 0].max
+      pad = " " * [panel_width - plain.size, 0].max
       STDOUT.print "\e[#{10 + i};1H#{num} #{lbl}#{pad}"
     end
 
-    default    = wm_sessions.empty? ? "" : "1"
+    default = wm_sessions.empty? ? "" : "1"
     choice_row = 10 + all_labels.size + 1
     STDOUT.print "\e[#{choice_row};1H#{Colors::MUTED}Choice [#{default}]:#{Colors::RESET} "
     STDOUT.flush
 
     choice = (STDIN.gets(chomp: true) || "").strip
     choice = default if choice.empty?
-    idx      = (choice.to_i? || 0) - 1
+    idx = (choice.to_i? || 0) - 1
     wm_count = wm_sessions.size
 
     if idx >= 0 && idx < wm_count
-      reap_finished_x11_sessions
-      vt = SessionTracker.next_vt
-      if vt.nil?
-        STDOUT.print "\e[#{choice_row + 1};1H#{Colors::ERROR}All session slots in use (max #{SessionTracker.capacity}).#{Colors::RESET}"
-        STDOUT.flush
-        sleep 2.seconds
-        LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
-      else
-        result = Sessions.launch_session(
+      session = wm_sessions[idx]
+      case session.session_type
+      in .x11?
+        reap_finished_x11_sessions
+        vt = SessionTracker.next_vt
+        if vt.nil?
+          STDOUT.print "\e[#{choice_row + 1};1H#{Colors::ERROR}All session slots in use (max #{SessionTracker.capacity}).#{Colors::RESET}"
+          STDOUT.flush
+          sleep 2.seconds
+          LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
+        else
+          result = Sessions.launch_session(
+            authenticated.pw, authenticated.pamh,
+            session.exec,
+            vt, @config.seat
+          )
+          unless result.is_ok?
+            Logger.error("session.x11.launch_failed", "X11 session launch failed", {username: authenticated.username, uid: authenticated.pw.pw_uid, error: result.error})
+            # launch_session already cleaned up pamh on error
+          end
+        end
+      in .wayland?
+        result = Sessions.launch_wayland_session(
           authenticated.pw, authenticated.pamh,
-          wm_sessions[idx].exec,
-          vt, @config.seat
+          session.exec,
+          @config.vt, @config.seat
         )
         unless result.is_ok?
-          Logger.error("session.x11.launch_failed", "X11 session launch failed", {username: authenticated.username, uid: authenticated.pw.pw_uid, error: result.error})
-          # launch_session already cleaned up pamh on error
+          Logger.error("session.wayland.launch_failed", "Wayland session launch failed", {username: authenticated.username, uid: authenticated.pw.pw_uid, error: result.error})
         end
       end
     elsif idx >= wm_count && idx < wm_count + config_entries.size

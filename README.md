@@ -18,12 +18,13 @@ root throughout — only the child drops to the user's UID/GID before exec.
 ## Session menu
 
 The menu is config-driven (see [Configuration](#configuration) below).
-X sessions are discovered automatically from `.desktop` files.
+X and Wayland sessions are discovered automatically from `.desktop` files.
 Static entries follow — by default:
 
 | Entry | Action |
 |-------|--------|
 | (discovered xsessions) | X11 session via startx |
+| (discovered wayland-sessions) | Wayland session executed directly on the greeter VT |
 | exit | Exit greeter |
 | reboot | `systemctl reboot` |
 | shutdown | `systemctl poweroff` |
@@ -39,10 +40,15 @@ optional — missing keys fall back to compiled-in defaults.
 title: "WMB Greeter"
 vt: 1        # virtual terminal number
 seat: seat0
+default_keyboard_layout: us  # us or dvorak
 
 xsession_dirs:
   - /run/current-system/sw/share/xsessions
   - /usr/share/xsessions
+
+wayland_session_dirs:
+  - /run/current-system/sw/share/wayland-sessions
+  - /usr/share/wayland-sessions
 
 menu:
   - action: exit
@@ -57,6 +63,10 @@ menu:
 Supported actions: `exit`, `reboot`, `shutdown`, `ssh`, `moonlight`.
 If the file is absent or unparseable, defaults are used and a warning is
 printed to stderr.
+
+Press `Ctrl+L` at the login or password prompt to toggle the greeter TTY
+keyboard layout between `us` and `dvorak`. This changes only the greeter
+console keymap; graphical sessions keep their own keyboard configuration.
 
 ## Architecture
 
@@ -78,6 +88,7 @@ src/
 - Linux with PAM (`linux-pam`)
 - NixOS (uses nix store paths for `coreutils`, `util-linux`, `xinit`)
 - `startx` + `fvwm3` for X sessions
+- a Wayland compositor with a `.desktop` file, such as `niri`
 - `systemd` (session registered via `systemd-run --user --scope`)
 
 ## Build
