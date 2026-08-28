@@ -20,6 +20,7 @@ require "./action"
 require "./config"
 require "./logger"
 require "./platform"
+require "./keyboard_layout"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # User lookup
@@ -240,6 +241,7 @@ end
 
 class Greeter
   def initialize(@config : Config)
+    @keyboard_layout = @config.default_keyboard_layout
   end
 
   def run
@@ -254,6 +256,7 @@ class Greeter
     _, cols = Terminal.term_size
     bar_col = [cols // 5, 4].max
     panel_width = bar_col - 1 # usable columns in the left panel
+    Terminal.apply_keymap_feedback(@keyboard_layout, panel_width)
 
     # ── header box (scales to panel width) ────────────────────────────────────
     inner = [panel_width - 2, 1].max
@@ -270,10 +273,11 @@ class Greeter
     # ── flush stale input before prompting ────────────────────────────────────
     LibC.tcflush(STDIN.fd, LibC::TCIFLUSH)
 
-    creds_result = Terminal.read_auth_inputs
+    Terminal.draw_keyboard_layout(@keyboard_layout, panel_width)
+    creds_result = Terminal.read_auth_inputs(@keyboard_layout, panel_width)
     return Action::NEXT_ITER unless creds_result.is_ok?
 
-    username, password = creds_result.value.not_nil!
+    username, password, @keyboard_layout = creds_result.value.not_nil!
     authenticated_result = Auth.auth(Auth::Credentials.new(
       username: username,
       password: password
@@ -303,21 +307,21 @@ class Greeter
 
     all_labels = wm_sessions.map(&.label) + config_entries.map(&.label)
     all_labels.each_with_index do |label, i|
-      num   = "#{Colors::NUMBER}#{i + 1})#{Colors::RESET}"
-      lbl   = "#{Colors::ITEM}#{label}#{Colors::RESET}"
+      num = "#{Colors::NUMBER}#{i + 1})#{Colors::RESET}"
+      lbl = "#{Colors::ITEM}#{label}#{Colors::RESET}"
       plain = "#{i + 1}) #{label}"
-      pad   = " " * [panel_width - plain.size, 0].max
+      pad = " " * [panel_width - plain.size, 0].max
       STDOUT.print "\e[#{10 + i};1H#{num} #{lbl}#{pad}"
     end
 
-    default    = wm_sessions.empty? ? "" : "1"
+    default = wm_sessions.empty? ? "" : "1"
     choice_row = 10 + all_labels.size + 1
     STDOUT.print "\e[#{choice_row};1H#{Colors::MUTED}Choice [#{default}]:#{Colors::RESET} "
     STDOUT.flush
 
     choice = (STDIN.gets(chomp: true) || "").strip
     choice = default if choice.empty?
-    idx      = (choice.to_i? || 0) - 1
+    idx = (choice.to_i? || 0) - 1
     wm_count = wm_sessions.size
 
     if idx >= 0 && idx < wm_count

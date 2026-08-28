@@ -10,6 +10,7 @@ let
     title         = cfg.title;
     vt            = cfg.vt;
     seat          = cfg.seat;
+    default_keyboard_layout = cfg.defaultKeyboardLayout;
     xsession_dirs = cfg.xsessionDirs;
     wayland_session_dirs = cfg.waylandSessionDirs;
     menu          = map
@@ -51,6 +52,12 @@ in
       type        = lib.types.str;
       default     = "seat0";
       description = "Seat identifier passed to logind.";
+    };
+
+    defaultKeyboardLayout = lib.mkOption {
+      type        = lib.types.enum [ "us" "dvorak" ];
+      default     = "us";
+      description = "Default Linux console keyboard layout used by the greeter.";
     };
 
     xsessionDirs = lib.mkOption {
@@ -110,6 +117,7 @@ in
     # Make sure xsession .desktop files from installed WMs are linked
     # into /run/current-system/sw/share/xsessions/
     environment.pathsToLink = [ "/share/xsessions" "/share/wayland-sessions" ];
+    environment.systemPackages = [ pkgs.kbd ];
 
     # Install as a setuid-root wrapper (required for PAM + privilege drop)
     security.wrappers.crystal-greeter = {

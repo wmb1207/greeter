@@ -1,6 +1,7 @@
 require "yaml"
 require "./logger"
 require "./platform"
+require "./keyboard_layout"
 
 CONFIG_PATH = "/etc/greeter.conf"
 
@@ -18,6 +19,7 @@ struct Config
   getter title : String
   getter vt : Int32
   getter seat : String
+  getter default_keyboard_layout : KeyboardLayout
   getter xsession_dirs : Array(String)
   getter wayland_session_dirs : Array(String)
   getter menu : Array(MenuEntry)
@@ -26,13 +28,14 @@ struct Config
     @title = "Greeter",
     @vt = 1,
     @seat = "seat0",
+    @default_keyboard_layout = KeyboardLayout::US,
     @xsession_dirs = DEFAULT_XSESSION_DIRS.dup,
     @wayland_session_dirs = DEFAULT_WAYLAND_SESSION_DIRS.dup,
-    @menu = DEFAULT_MENU.dup
+    @menu = DEFAULT_MENU.dup,
   )
   end
 
-  DEFAULT_XSESSION_DIRS = Platform.default_xsession_dirs
+  DEFAULT_XSESSION_DIRS        = Platform.default_xsession_dirs
   DEFAULT_WAYLAND_SESSION_DIRS = Platform.default_wayland_session_dirs
 
   DEFAULT_MENU = [
@@ -53,31 +56,49 @@ struct Config
 
   private def self.parse(doc : YAML::Any) : Config
     title = doc["title"]?.try(&.as_s) || "Greeter"
-    vt    = doc["vt"]?.try(&.as_i) || 1
-    seat  = doc["seat"]?.try(&.as_s) || "seat0"
+    vt = doc["vt"]?.try(&.as_i) || 1
+    seat = doc["seat"]?.try(&.as_s) || "seat0"
+    default_keyboard_layout = parse_keyboard_layout(doc["default_keyboard_layout"]?.try(&.as_s))
 
     xsession_dirs = doc["xsession_dirs"]?.try(&.as_a.map(&.as_s)) || DEFAULT_XSESSION_DIRS.dup
     wayland_session_dirs = doc["wayland_session_dirs"]?.try(&.as_a.map(&.as_s)) || DEFAULT_WAYLAND_SESSION_DIRS.dup
 
     menu = doc["menu"]?.try(&.as_a.compact_map { |e| parse_menu_entry(e) }) || DEFAULT_MENU.dup
 
-    new(title: title, vt: vt, seat: seat, xsession_dirs: xsession_dirs, wayland_session_dirs: wayland_session_dirs, menu: menu)
+    new(
+      title: title,
+      vt: vt,
+      seat: seat,
+      default_keyboard_layout: default_keyboard_layout,
+      xsession_dirs: xsession_dirs,
+      wayland_session_dirs: wayland_session_dirs,
+      menu: menu
+    )
+  end
+
+  private def self.parse_keyboard_layout(value : String?) : KeyboardLayout
+    return KeyboardLayout::US if value.nil?
+
+    KeyboardLayout.parse(value.not_nil!) || begin
+      Logger.warn("config.invalid_keyboard_layout", "Invalid keyboard layout; using default", {layout: value})
+      KeyboardLayout::US
+    end
   end
 
   private def self.parse_menu_entry(entry : YAML::Any) : MenuEntry?
     action_str = entry["action"]?.try(&.as_s) || return nil
     action = case action_str.downcase
-    when "exit"      then MenuAction::Exit
-    when "reboot"    then MenuAction::Reboot
-    when "shutdown"  then MenuAction::Shutdown
-    when "ssh"       then MenuAction::SSH
-    when "moonlight" then MenuAction::Moonlight
-    else
-      Logger.warn("config.unknown_menu_action", "Ignoring unknown menu action", {action: action_str})
-      return nil
-    end
+             when "exit"      then MenuAction::Exit
+             when "reboot"    then MenuAction::Reboot
+             when "shutdown"  then MenuAction::Shutdown
+             when "ssh"       then MenuAction::SSH
+             when "moonlight" then MenuAction::Moonlight
+             else
+               Logger.warn("config.unknown_menu_action", "Ignoring unknown menu action", {action: action_str})
+               return nil
+             end
 
-    host  = entry["host"]?.try(&.as_s)
+    host = entry["host"]?.try(&.as_s)
     label = entry["label"]?.try(&.as_s) || default_label(action, host)
 
     MenuEntry.new(action, label, host)

@@ -40,6 +40,7 @@ optional — missing keys fall back to compiled-in defaults.
 title: "WMB Greeter"
 vt: 1        # virtual terminal number
 seat: seat0
+default_keyboard_layout: us  # us or dvorak
 
 xsession_dirs:
   - /run/current-system/sw/share/xsessions
@@ -62,6 +63,10 @@ menu:
 Supported actions: `exit`, `reboot`, `shutdown`, `ssh`, `moonlight`.
 If the file is absent or unparseable, defaults are used and a warning is
 printed to stderr.
+
+Press `Ctrl+L` at the login or password prompt to toggle the greeter TTY
+keyboard layout between `us` and `dvorak`. This changes only the greeter
+console keymap; graphical sessions keep their own keyboard configuration.
 
 ## Architecture
 

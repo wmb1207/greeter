@@ -1,4 +1,9 @@
+require "./result"
+require "./keyboard_layout"
+
 module Platform
+  alias CommandResult = Result(Bool)
+
   def self.freebsd? : Bool
     {{ flag?(:freebsd) }}
   end
@@ -78,5 +83,31 @@ module Platform
 
   def self.shutdown_command : Tuple(String, Array(String))
     freebsd? ? {"shutdown", ["-p", "now"]} : {"systemctl", ["poweroff"]}
+  end
+
+  def self.loadkeys_command : String?
+    [
+      "/run/current-system/sw/bin/loadkeys",
+      "/usr/bin/loadkeys",
+      "/bin/loadkeys",
+      "/usr/local/bin/loadkeys",
+    ].find { |path| File::Info.executable?(path) }
+  end
+
+  def self.apply_keymap(layout : KeyboardLayout) : CommandResult
+    command = loadkeys_command
+    return CommandResult.error("loadkeys command not found") if command.nil?
+
+    output = IO::Memory.new
+    error = IO::Memory.new
+    status = Process.run(command.not_nil!, [layout.keymap], output: output, error: error)
+    return CommandResult.ok(true) if status.success?
+
+    detail = error.to_s.strip
+    detail = output.to_s.strip if detail.empty?
+    detail = "exit status #{status.exit_code}" if detail.empty?
+    CommandResult.error(detail)
+  rescue ex
+    CommandResult.error(ex.message || ex.class.name)
   end
 end

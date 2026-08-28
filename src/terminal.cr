@@ -1,4 +1,7 @@
 require "./result"
+require "./keyboard_layout"
+require "./platform"
+require "./logger"
 
 # ANSI 256-color codes — Nord-earthy palette.
 # 66  dusty teal-slate  → borders / structural lines
@@ -24,21 +27,26 @@ module Colors
 end
 
 module Terminal
-  alias Credentials = Result({String, String})
+  alias Credentials = Result({String, String, KeyboardLayout})
+  CTRL_L    = '\f'
+  BACKSPACE = '\b'
+  DELETE    = '\u007f'
 
-  def self.read_auth_inputs : Credentials
-    STDOUT.print "\e[5;1H#{Colors::PROMPT}login:#{Colors::RESET} "
-    STDOUT.flush
-    username = STDIN.gets(chomp: true)
-    return Credentials.error("Empty username") if username.nil? || username.strip.empty?
+  def self.read_auth_inputs(layout : KeyboardLayout, panel_width : Int32) : Credentials
+    username_result = read_line_with_layout_toggle(5, "login:", false, layout, panel_width)
+    return Credentials.error(username_result.error.not_nil!) unless username_result.is_ok?
+
+    username, layout = username_result.value.not_nil!
     username = username.strip
+    return Credentials.error("Empty username") if username.empty?
 
-    STDOUT.print "\e[6;1H#{Colors::PROMPT}Password:#{Colors::RESET} "
-    STDOUT.flush
-    password = read_password
+    password_result = read_line_with_layout_toggle(6, "Password:", true, layout, panel_width)
+    return Credentials.error(password_result.error.not_nil!) unless password_result.is_ok?
+
+    password, layout = password_result.value.not_nil!
     return Credentials.error("Empty password") if password.empty?
 
-    Credentials.ok({username, password})
+    Credentials.ok({username, password, layout})
   end
 
   def self.clear_screen
@@ -80,6 +88,94 @@ module Terminal
     ensure
       # Restore original terminal settings unconditionally.
       LibC.tcsetattr(fd, LibC::TCSANOW, pointerof(old_term))
+    end
+  end
+
+  private alias LineResult = Result({String, KeyboardLayout})
+
+  private def self.read_line_with_layout_toggle(row : Int32, prompt : String, hidden : Bool, layout : KeyboardLayout, panel_width : Int32) : LineResult
+    prompt_text = "#{prompt} "
+    prompt_col = prompt_text.size + 1
+    input_width = [panel_width - prompt_text.size, 1].max
+    buffer = String.build { }
+
+    STDOUT.print "\e[#{row};1H#{Colors::PROMPT}#{prompt}#{Colors::RESET} "
+    STDOUT.print " " * input_width
+    STDOUT.print "\e[#{row};#{prompt_col}H"
+    STDOUT.flush
+
+    with_noncanonical_input do
+      loop do
+        char = STDIN.read_char
+        return LineResult.error("Input error") if char.nil?
+
+        case char
+        when '\r', '\n'
+          STDOUT.print "\e[#{row + 1};1H"
+          STDOUT.flush
+          return LineResult.ok({buffer, layout})
+        when CTRL_L
+          next_layout = layout.toggle
+          layout = next_layout if apply_keymap_feedback(next_layout, panel_width)
+          redraw_input(row, prompt_col, input_width, buffer, hidden)
+        when BACKSPACE, DELETE
+          unless buffer.empty?
+            buffer = buffer[0, buffer.size - 1]
+            redraw_input(row, prompt_col, input_width, buffer, hidden)
+          end
+        else
+          next if char.ord < 32
+          buffer += char.to_s
+          redraw_input(row, prompt_col, input_width, buffer, hidden)
+        end
+      end
+    end
+  end
+
+  private def self.with_noncanonical_input(&)
+    fd = STDIN.fd
+    old_term = LibC::Termios.new
+    LibC.tcgetattr(fd, pointerof(old_term))
+
+    begin
+      raw = old_term
+      raw.c_lflag = old_term.c_lflag & ~(LibC::ECHO | LibC::ICANON).to_u32
+      raw.c_cc[LibC::VMIN] = 1
+      raw.c_cc[LibC::VTIME] = 0
+      LibC.tcsetattr(fd, LibC::TCSANOW, pointerof(raw))
+      yield
+    ensure
+      LibC.tcsetattr(fd, LibC::TCSANOW, pointerof(old_term))
+    end
+  end
+
+  private def self.redraw_input(row : Int32, prompt_col : Int32, input_width : Int32, buffer : String, hidden : Bool)
+    visible = hidden ? "*" * buffer.size : buffer
+    visible = visible[-input_width, input_width] if visible.size > input_width
+    STDOUT.print "\e[#{row};#{prompt_col}H#{visible.ljust(input_width)}"
+    cursor_col = prompt_col + [visible.size, input_width].min
+    STDOUT.print "\e[#{row};#{cursor_col}H"
+    STDOUT.flush
+  end
+
+  def self.draw_keyboard_layout(layout : KeyboardLayout, panel_width : Int32)
+    text = "layout: #{layout.label}"
+    STDOUT.print "\e[4;1H#{Colors::MUTED}#{text[0, panel_width].ljust(panel_width)}#{Colors::RESET}"
+    STDOUT.flush
+  end
+
+  def self.apply_keymap_feedback(layout : KeyboardLayout, panel_width : Int32) : Bool
+    result = Platform.apply_keymap(layout)
+    if result.is_ok?
+      draw_keyboard_layout(layout, panel_width)
+      Logger.info("keyboard.layout_changed", "Keyboard layout changed", {layout: layout.keymap})
+      true
+    else
+      Logger.warn("keyboard.layout_change_failed", "Keyboard layout change failed", {layout: layout.keymap, error: result.error})
+      msg = "layout failed: #{layout.label}"
+      STDOUT.print "\e[8;1H#{Colors::ERROR}#{msg[0, panel_width].ljust(panel_width)}#{Colors::RESET}"
+      STDOUT.flush
+      false
     end
   end
 
