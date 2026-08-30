@@ -24,6 +24,7 @@ module Colors
   SUCCESS = "\e[38;5;106m"   # moss green — welcome / ok messages
   ERROR   = "\e[38;5;130m"   # terracotta rust — auth failure
   MUTED   = "\e[38;5;101m"   # olive-gray — choice prompt
+  INFO    = "\e[38;5;244m"   # soft gray — right-side machine details
 end
 
 module Terminal
@@ -72,6 +73,28 @@ module Terminal
     rows.times { |r| STDOUT.print "\e[#{r + 1};#{bar_col}H#{Colors::DIM}│#{Colors::RESET}" }
     STDOUT.flush
     {bar_col + 2, rows}
+  end
+
+  def self.draw_machine_details(left_col : Int32, rows : Int32)
+    _, cols = term_size
+    width = cols - left_col + 1
+    return if width < 18 || rows < 4
+
+    details = Platform.machine_details
+    return if details.empty?
+
+    title = "machine"
+    STDOUT.print "\e[2;#{left_col}H#{Colors::TITLE}#{title[0, width].ljust(width)}#{Colors::RESET}"
+
+    details.first(rows - 4).each_with_index do |(label, value), i|
+      row = 4 + i
+      prefix = label.empty? ? "  " : "#{label}: "
+      available = [width - prefix.size, 1].max
+      line = "#{Colors::MUTED}#{prefix}#{Colors::RESET}#{Colors::INFO}#{value[0, available]}#{Colors::RESET}"
+      STDOUT.print "\e[#{row};#{left_col}H#{line}"
+    end
+
+    STDOUT.flush
   end
 
   def self.read_password : String

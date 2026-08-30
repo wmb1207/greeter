@@ -171,7 +171,6 @@ module Sessions
     username = local_env_vars["USER"]
 
     Logger.info("session.x11.starting", "Starting X11 session", {username: username, uid: pw.pw_uid, session: wm_exec, vt: vt, display: display})
-    puts "Launching #{wm_exec.split.first} on :#{display} (vt#{vt}) for #{username}..."
 
     pid = LibC.fork
     if pid == 0
@@ -223,7 +222,6 @@ module Sessions
     end
 
     Logger.info("session.wayland.starting", "Starting Wayland session", {username: username, uid: pw.pw_uid, session: session_exec, vt: vt})
-    puts "Launching #{args.first} on vt#{vt} for #{username}..."
 
     pid = LibC.fork
     if pid == 0
@@ -297,7 +295,6 @@ module Sessions
     end
 
     Logger.info("session.ssh.starting", "Starting SSH session", {username: local_env_vars["USER"], uid: pw.pw_uid, host: host})
-    puts "Connecting to #{host}..."
 
     pid = LibC.fork
     if pid == 0
@@ -317,7 +314,6 @@ module Sessions
     else
       Logger.warn("session.ssh.ended", "SSH session exited abnormally", {username: local_env_vars["USER"], uid: pw.pw_uid, host: host, exit_code: exit_code})
     end
-    puts "SSH session ended."
     sleep 1.second
     ActionResult.ok(Action::NO_ACTION)
   end
