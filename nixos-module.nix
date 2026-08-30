@@ -114,6 +114,17 @@ in
     # Place the generated config at /etc/greeter.conf
     environment.etc."greeter.conf".source = configFile;
 
+    # Keep boot and service status chatter off the greeter TTY. The greeter is
+    # the only process that should write user-facing text to its console.
+    boot.consoleLogLevel = lib.mkDefault 1;
+    boot.kernelParams = [
+      "quiet"
+      "loglevel=3"
+      "udev.log_level=3"
+      "systemd.show_status=false"
+      "rd.systemd.show_status=false"
+    ];
+
     # Make sure xsession .desktop files from installed WMs are linked
     # into /run/current-system/sw/share/xsessions/
     environment.pathsToLink = [ "/share/xsessions" "/share/wayland-sessions" ];
@@ -150,6 +161,7 @@ in
         TTYPath        = "/dev/tty${toString cfg.vt}";
         TTYReset       = true;
         TTYVHangup     = true;
+        TTYVTDisallocate = true;
         Restart        = "always";
         RestartSec     = "1s";
       };

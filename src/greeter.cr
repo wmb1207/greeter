@@ -135,7 +135,6 @@ def launch_moonlight(pw : LibC::Passwd, pamh : LibPAM::PamHandle, host : String)
   pam_env.each { |k, v| env[k] ||= v }
 
   Logger.info("session.moonlight.starting", "Starting Moonlight session", {username: user, uid: pw.pw_uid, host: host})
-  puts "Connecting to #{host} via Moonlight..."
 
   pid = LibC.fork
   if pid == 0
@@ -174,10 +173,8 @@ def launch_moonlight(pw : LibC::Passwd, pamh : LibPAM::PamHandle, host : String)
   exit_code = (raw_status >> 8) & 0xff
   if exited && exit_code == 0
     Logger.info("session.moonlight.ended", "Moonlight session ended", {username: user, uid: pw.pw_uid, host: host, exit_code: exit_code})
-    puts "Moonlight session ended normally."
   else
     Logger.warn("session.moonlight.ended", "Moonlight session exited abnormally", {username: user, uid: pw.pw_uid, host: host, exit_code: exit_code})
-    puts "Moonlight session exited (code #{exit_code})."
   end
 
   LibPAM.pam_close_session(pamh, 0)
@@ -252,10 +249,11 @@ class Greeter
     reap_finished_x11_sessions
 
     Terminal.clear_screen
-    _, rows = Terminal.draw_sidebar
+    right_col, rows = Terminal.draw_sidebar
     _, cols = Terminal.term_size
     bar_col = [cols // 5, 4].max
     panel_width = bar_col - 1 # usable columns in the left panel
+    Terminal.draw_machine_details(right_col, rows)
     Terminal.apply_keymap_feedback(@keyboard_layout, panel_width)
 
     # ── header box (scales to panel width) ────────────────────────────────────
