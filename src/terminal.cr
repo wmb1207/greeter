@@ -33,6 +33,12 @@ module Terminal
   BACKSPACE = '\b'
   DELETE    = '\u007f'
 
+  def self.prepare_display
+    # The Linux console can start in a non-UTF-8 character set after systemd
+    # resets the TTY. Select UTF-8/default G0 before drawing box characters.
+    STDOUT.print "\e%G\e(B"
+  end
+
   def self.read_auth_inputs(layout : KeyboardLayout, panel_width : Int32) : Credentials
     username_result = read_line_with_layout_toggle(5, "login:", false, layout, panel_width)
     return Credentials.error(username_result.error.not_nil!) unless username_result.is_ok?
@@ -53,6 +59,7 @@ module Terminal
   def self.clear_screen
     # \e[2J → clear screen
     # \e[H  → move cursor to top-left
+    prepare_display
     STDOUT.print "\e[2J\e[H"
     STDOUT.flush
   end
