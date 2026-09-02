@@ -35,8 +35,9 @@ module Terminal
 
   def self.prepare_display
     # The Linux console can start in a non-UTF-8 character set after systemd
-    # resets the TTY. Select UTF-8/default G0 before drawing box characters.
-    STDOUT.print "\e%G\e(B"
+    # resets the TTY. Select UTF-8/default G0 and shift back into G0 before
+    # drawing box characters.
+    STDOUT.print "\e%G\e(B\x0f"
   end
 
   def self.read_auth_inputs(layout : KeyboardLayout, panel_width : Int32) : Credentials
@@ -197,6 +198,7 @@ module Terminal
   def self.apply_keymap_feedback(layout : KeyboardLayout, panel_width : Int32) : Bool
     result = Platform.apply_keymap(layout)
     if result.is_ok?
+      prepare_display
       draw_keyboard_layout(layout, panel_width)
       Logger.info("keyboard.layout_changed", "Keyboard layout changed", {layout: layout.keymap})
       true
