@@ -144,7 +144,8 @@ in
 
     systemd.services.crystal-greeter = {
       description = "Crystal TTY greeter";
-      after       = [ "systemd-user-sessions.service" ];
+      after       = [ "systemd-vconsole-setup.service" "systemd-user-sessions.service" ];
+      wants       = [ "systemd-vconsole-setup.service" ];
       wantedBy    = [ "multi-user.target" ];
       conflicts   = [ "getty@tty${toString cfg.vt}.service" ];
       serviceConfig = {

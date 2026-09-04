@@ -73,6 +73,16 @@ module Terminal
     (ret == 0 && ws.ws_col > 0) ? {ws.ws_row.to_i, ws.ws_col.to_i} : {24, 80}
   end
 
+  def self.wait_for_stable_size
+    previous = term_size
+    4.times do
+      sleep 100.milliseconds
+      current = term_size
+      return if current == previous
+      previous = current
+    end
+  end
+
   # Draw a full-height vertical bar at 20% of the terminal width.
   # Returns {right_col, rows} — right_col is where content should start.
   def self.draw_sidebar : {Int32, Int32}

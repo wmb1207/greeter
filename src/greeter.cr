@@ -239,6 +239,7 @@ end
 class Greeter
   def initialize(@config : Config)
     @keyboard_layout = @config.default_keyboard_layout
+    @display_initialized = false
   end
 
   def run
@@ -248,13 +249,20 @@ class Greeter
   private def do_run : Action
     reap_finished_x11_sessions
 
+    keymap_result = Platform.apply_keymap(@keyboard_layout)
+    Terminal.prepare_display
+    unless @display_initialized
+      Terminal.wait_for_stable_size
+      @display_initialized = true
+    end
+
     Terminal.clear_screen
     right_col, rows = Terminal.draw_sidebar
     _, cols = Terminal.term_size
     bar_col = [cols // 5, 4].max
     panel_width = bar_col - 1 # usable columns in the left panel
     Terminal.draw_machine_details(right_col, rows)
-    Terminal.apply_keymap_feedback(@keyboard_layout, panel_width)
+    show_keymap_status(keymap_result, panel_width)
 
     # ── header box (scales to panel width) ────────────────────────────────────
     inner = [panel_width - 2, 1].max
@@ -271,7 +279,6 @@ class Greeter
     # ── flush stale input before prompting ────────────────────────────────────
     LibC.tcflush(STDIN.fd, LibC::TCIFLUSH)
 
-    Terminal.draw_keyboard_layout(@keyboard_layout, panel_width)
     creds_result = Terminal.read_auth_inputs(@keyboard_layout, panel_width)
     return Action::NEXT_ITER unless creds_result.is_ok?
 
@@ -361,6 +368,18 @@ class Greeter
     end
 
     Action::NO_ACTION
+  end
+
+  private def show_keymap_status(result : Platform::CommandResult, panel_width : Int)
+    if result.is_ok?
+      Terminal.draw_keyboard_layout(@keyboard_layout, panel_width)
+      Logger.info("keyboard.layout_changed", "Keyboard layout changed", {layout: @keyboard_layout.keymap})
+    else
+      Logger.warn("keyboard.layout_change_failed", "Keyboard layout change failed", {layout: @keyboard_layout.keymap, error: result.error})
+      msg = "layout failed: #{@keyboard_layout.label}"
+      STDOUT.print "\e[8;1H#{Colors::ERROR}#{msg[0, panel_width].ljust(panel_width)}#{Colors::RESET}"
+      STDOUT.flush
+    end
   end
 
   private def dispatch_entry(entry : MenuEntry, authenticated : Auth::LoginSession, choice_row : Int)
