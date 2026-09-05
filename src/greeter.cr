@@ -240,6 +240,7 @@ class Greeter
   def initialize(@config : Config)
     @keyboard_layout = @config.default_keyboard_layout
     @display_initialized = false
+    @first_boot_empty_submit = true
   end
 
   def run
@@ -256,28 +257,17 @@ class Greeter
       @display_initialized = true
     end
 
-    Terminal.clear_screen
-    right_col, rows = Terminal.draw_sidebar
-    _, cols = Terminal.term_size
-    bar_col = [cols // 5, 4].max
-    panel_width = bar_col - 1 # usable columns in the left panel
-    Terminal.draw_machine_details(right_col, rows)
-    show_keymap_status(keymap_result, panel_width)
-
-    # ── header box (scales to panel width) ────────────────────────────────────
-    inner = [panel_width - 2, 1].max
-    title = @config.title
-    title = title[0, inner] if title.size > inner
-    pad = inner - title.size
-    lpad = pad // 2
-    rpad = pad - lpad
-    STDOUT.print "\e[1;1H#{Colors::BORDER}#{"+" + "-" * inner + "+"}#{Colors::RESET}"
-    STDOUT.print "\e[2;1H#{Colors::BORDER}|#{Colors::RESET}#{" " * lpad}#{Colors::TITLE}#{title}#{Colors::RESET}#{" " * rpad}#{Colors::BORDER}|#{Colors::RESET}"
-    STDOUT.print "\e[3;1H#{Colors::BORDER}#{"+" + "-" * inner + "+"}#{Colors::RESET}"
-    STDOUT.flush
+    panel_width = draw_login_screen(keymap_result)
 
     # ── flush stale input before prompting ────────────────────────────────────
     LibC.tcflush(STDIN.fd, LibC::TCIFLUSH)
+
+    if @first_boot_empty_submit
+      Terminal.draw_login_prompt(panel_width)
+      sleep 1.second
+      @first_boot_empty_submit = false
+      return Action::NEXT_ITER
+    end
 
     creds_result = Terminal.read_auth_inputs(@keyboard_layout, panel_width)
     return Action::NEXT_ITER unless creds_result.is_ok?
@@ -303,6 +293,29 @@ class Greeter
     STDOUT.flush
 
     menu panel_width, authenticated
+  end
+
+  private def draw_login_screen(keymap_result : Platform::CommandResult) : Int32
+    Terminal.clear_screen
+    right_col, rows = Terminal.draw_sidebar
+    _, cols = Terminal.term_size
+    bar_col = [cols // 5, 4].max
+    panel_width = bar_col - 1 # usable columns in the left panel
+    Terminal.draw_machine_details(right_col, rows)
+    show_keymap_status(keymap_result, panel_width)
+
+    # ── header box (scales to panel width) ────────────────────────────────────
+    inner = [panel_width - 2, 1].max
+    title = @config.title
+    title = title[0, inner] if title.size > inner
+    pad = inner - title.size
+    lpad = pad // 2
+    rpad = pad - lpad
+    STDOUT.print "\e[1;1H#{Colors::BORDER}#{"+" + "-" * inner + "+"}#{Colors::RESET}"
+    STDOUT.print "\e[2;1H#{Colors::BORDER}|#{Colors::RESET}#{" " * lpad}#{Colors::TITLE}#{title}#{Colors::RESET}#{" " * rpad}#{Colors::BORDER}|#{Colors::RESET}"
+    STDOUT.print "\e[3;1H#{Colors::BORDER}#{"+" + "-" * inner + "+"}#{Colors::RESET}"
+    STDOUT.flush
+    panel_width
   end
 
   private def menu(panel_width : Int, authenticated : Auth::LoginSession)

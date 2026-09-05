@@ -139,6 +139,7 @@ module Terminal
     prompt_col = prompt_text.size + 1
     input_width = [panel_width - prompt_text.size, 1].max
     buffer = String.build { }
+    last_size = term_size
 
     STDOUT.print "\e[#{row};1H#{Colors::PROMPT}#{prompt}#{Colors::RESET} "
     STDOUT.print " " * input_width
@@ -148,7 +149,11 @@ module Terminal
     with_noncanonical_input do
       loop do
         char = STDIN.read_char
-        return LineResult.error("Input error") if char.nil?
+        if char.nil?
+          current_size = term_size
+          return LineResult.error("Display changed") if current_size != last_size
+          next
+        end
 
         case char
         when '\r', '\n'
@@ -181,8 +186,8 @@ module Terminal
     begin
       raw = old_term
       raw.c_lflag = old_term.c_lflag & ~(LibC::ECHO | LibC::ICANON).to_u32
-      raw.c_cc[LibC::VMIN] = 1
-      raw.c_cc[LibC::VTIME] = 0
+      raw.c_cc[LibC::VMIN] = 0
+      raw.c_cc[LibC::VTIME] = 5
       LibC.tcsetattr(fd, LibC::TCSANOW, pointerof(raw))
       yield
     ensure
@@ -202,6 +207,18 @@ module Terminal
   def self.draw_keyboard_layout(layout : KeyboardLayout, panel_width : Int32)
     text = "layout: #{layout.label}"
     STDOUT.print "\e[4;1H#{Colors::MUTED}#{text[0, panel_width].ljust(panel_width)}#{Colors::RESET}"
+    STDOUT.flush
+  end
+
+  def self.draw_login_prompt(panel_width : Int32)
+    prompt = "login:"
+    prompt_text = "#{prompt} "
+    prompt_col = prompt_text.size + 1
+    input_width = [panel_width - prompt_text.size, 1].max
+
+    STDOUT.print "\e[5;1H#{Colors::PROMPT}#{prompt}#{Colors::RESET} "
+    STDOUT.print " " * input_width
+    STDOUT.print "\e[5;#{prompt_col}H"
     STDOUT.flush
   end
 
