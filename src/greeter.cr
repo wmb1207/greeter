@@ -240,6 +240,7 @@ class Greeter
   def initialize(@config : Config)
     @keyboard_layout = @config.default_keyboard_layout
     @display_initialized = false
+    @first_boot_empty_submit = true
   end
 
   def run
@@ -260,6 +261,13 @@ class Greeter
 
     # ── flush stale input before prompting ────────────────────────────────────
     LibC.tcflush(STDIN.fd, LibC::TCIFLUSH)
+
+    if @first_boot_empty_submit
+      Terminal.draw_login_prompt(panel_width)
+      sleep 1.second
+      @first_boot_empty_submit = false
+      return Action::NEXT_ITER
+    end
 
     creds_result = Terminal.read_auth_inputs(@keyboard_layout, panel_width)
     return Action::NEXT_ITER unless creds_result.is_ok?

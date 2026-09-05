@@ -205,6 +205,18 @@ module Terminal
     STDOUT.flush
   end
 
+  def self.draw_login_prompt(panel_width : Int32)
+    prompt = "login:"
+    prompt_text = "#{prompt} "
+    prompt_col = prompt_text.size + 1
+    input_width = [panel_width - prompt_text.size, 1].max
+
+    STDOUT.print "\e[5;1H#{Colors::PROMPT}#{prompt}#{Colors::RESET} "
+    STDOUT.print " " * input_width
+    STDOUT.print "\e[5;#{prompt_col}H"
+    STDOUT.flush
+  end
+
   def self.apply_keymap_feedback(layout : KeyboardLayout, panel_width : Int32) : Bool
     result = Platform.apply_keymap(layout)
     if result.is_ok?
