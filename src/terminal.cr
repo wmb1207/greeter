@@ -29,9 +29,9 @@ end
 
 module Terminal
   alias Credentials = Result({String, String, KeyboardLayout})
-  CTRL_L    = '\f'
-  BACKSPACE = '\b'
-  DELETE    = '\u007f'
+  CTRL_L    = 0x0c_u8
+  BACKSPACE = 0x08_u8
+  DELETE    = 0x7f_u8
 
   def self.prepare_display
     # The Linux console can start in a non-UTF-8 character set after systemd
@@ -147,11 +147,11 @@ module Terminal
 
     with_noncanonical_input do
       loop do
-        char = STDIN.read_char
-        return LineResult.error("Input error") if char.nil?
+        byte = STDIN.read_byte
+        return LineResult.error("Input error") if byte.nil?
 
-        case char
-        when '\r', '\n'
+        case byte
+        when 0x0d_u8, 0x0a_u8
           STDOUT.print "\e[#{row + 1};1H"
           STDOUT.flush
           return LineResult.ok({buffer, layout})
@@ -165,8 +165,8 @@ module Terminal
             redraw_input(row, prompt_col, input_width, buffer, hidden)
           end
         else
-          next if char.ord < 32
-          buffer += char.to_s
+          next if byte < 32
+          buffer += byte.chr
           redraw_input(row, prompt_col, input_width, buffer, hidden)
         end
       end
