@@ -1,0 +1,857 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>greeter: Crystal-powered TTY login</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #c0c0c0;
+      --panel: #d4d4d4;
+      --panel-strong: #c7c7c7;
+      --text: #232333;
+      --muted: #806080;
+      --line: #707070;
+      --accent: #205070;
+      --accent-2: #6c1f1c;
+      --accent-3: #23733c;
+      --danger: #336c6c;
+      --code: #232333;
+      --code-text: #d4d4d4;
+      --slide-w: 1280px;
+      --slide-h: 720px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      overflow: hidden;
+    }
+
+    .deck {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+
+    .slide {
+      display: none;
+      width: min(var(--slide-w), calc(100vw - 48px));
+      aspect-ratio: 16 / 9;
+      max-height: calc(100vh - 48px);
+      padding: 54px 64px 46px;
+      background: var(--panel);
+      border: 3px solid var(--text);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .slide::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 10px;
+      background: var(--accent);
+    }
+
+    .slide.active {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+
+    .slide::after {
+      content: attr(data-kicker);
+      position: absolute;
+      right: 34px;
+      bottom: 24px;
+      font: 600 12px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      letter-spacing: 0;
+      color: var(--muted);
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin: 0;
+    }
+
+    h1 {
+      font-size: 74px;
+      line-height: 0.94;
+      font-weight: 780;
+      letter-spacing: 0;
+      max-width: 920px;
+    }
+
+    h2 {
+      color: var(--accent);
+      font-size: 38px;
+      line-height: 1.12;
+      letter-spacing: 0;
+      margin-bottom: 24px;
+    }
+
+    h3 {
+      font-size: 25px;
+      line-height: 1.2;
+      margin-bottom: 12px;
+      color: var(--accent-2);
+    }
+
+    p,
+    li {
+      font-size: 28px;
+      line-height: 1.35;
+      color: var(--text);
+    }
+
+    p {
+      max-width: 920px;
+      margin-top: 16px;
+    }
+
+    ul,
+    ol {
+      margin: 0;
+      padding-left: 34px;
+      max-width: 1020px;
+    }
+
+    li + li {
+      margin-top: 12px;
+    }
+
+    code,
+    pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    }
+
+    code {
+      color: var(--accent);
+      font-size: 0.88em;
+    }
+
+    pre {
+      width: 100%;
+      margin: 6px 0 0;
+      padding: 22px 24px;
+      background: var(--code);
+      border: 0;
+      border-left: 10px solid var(--accent-2);
+      border-radius: 0;
+      overflow: hidden;
+      white-space: pre-wrap;
+      color: var(--code-text);
+      font-size: 21px;
+      line-height: 1.25;
+    }
+
+    .eyebrow {
+      color: var(--accent-2);
+      font: 700 18px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      margin-bottom: 20px;
+      text-transform: uppercase;
+    }
+
+    .subtitle {
+      font-size: 35px;
+      color: var(--muted);
+      max-width: 820px;
+      margin-top: 26px;
+    }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 34px;
+      align-items: start;
+    }
+
+    .three-col {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 18px;
+      align-items: stretch;
+    }
+
+    .tile {
+      border: 2px solid var(--text);
+      background: var(--panel-strong);
+      border-radius: 0;
+      padding: 22px;
+      min-height: 150px;
+    }
+
+    .tile p,
+    .small {
+      font-size: 22px;
+      line-height: 1.34;
+      color: var(--muted);
+    }
+
+    .terminal {
+      background: var(--code);
+      border: 0;
+      border-radius: 0;
+      padding: 26px;
+      min-height: 390px;
+      font: 22px/1.42 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color: var(--code-text);
+    }
+
+    .terminal .dim {
+      color: #a080a0;
+    }
+
+    .terminal .good {
+      color: #23733c;
+    }
+
+    .terminal .warn {
+      color: #205070;
+    }
+
+    .terminal .bad {
+      color: #336c6c;
+    }
+
+    .diagram {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: 18px;
+      align-items: center;
+      margin-top: 4px;
+    }
+
+    .node {
+      border: 2px solid var(--accent);
+      background: var(--panel-strong);
+      border-radius: 0;
+      padding: 18px 20px;
+      min-height: 92px;
+    }
+
+    .node strong {
+      display: block;
+      color: var(--text);
+      font-size: 25px;
+      margin-bottom: 8px;
+    }
+
+    .node span {
+      color: var(--muted);
+      font-size: 20px;
+      line-height: 1.25;
+    }
+
+    .arrow {
+      color: var(--accent-2);
+      font: 800 34px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .flow div {
+      min-height: 126px;
+      padding: 18px;
+      border-radius: 0;
+      border: 2px solid var(--accent);
+      background: var(--panel-strong);
+      font-size: 22px;
+      line-height: 1.22;
+    }
+
+    .tag-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 24px;
+    }
+
+    .tag {
+      border: 2px solid var(--text);
+      color: var(--text);
+      padding: 9px 12px;
+      border-radius: 0;
+      font: 700 18px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: var(--panel-strong);
+    }
+
+    .progress {
+      position: fixed;
+      left: 24px;
+      right: 24px;
+      bottom: 12px;
+      height: 4px;
+      background: var(--line);
+      z-index: 10;
+    }
+
+    .progress span {
+      display: block;
+      height: 100%;
+      width: 0;
+      background: var(--accent);
+      transition: width 120ms ease;
+    }
+
+    .hud {
+      position: fixed;
+      top: 14px;
+      right: 24px;
+      z-index: 10;
+      color: var(--text);
+      font: 700 13px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .speaker-note {
+      margin-top: 20px;
+      color: var(--muted);
+      font-size: 22px;
+      border-left: 6px solid var(--accent);
+      padding-left: 16px;
+    }
+
+    .compact li {
+      font-size: 24px;
+      margin-top: 8px;
+    }
+
+    .large-list li {
+      font-size: 31px;
+    }
+
+    .title-slide {
+      justify-content: flex-end;
+      padding-bottom: 82px;
+    }
+
+    @media (max-width: 900px) {
+      .deck {
+        padding: 0;
+      }
+
+      .slide {
+        width: 100vw;
+        height: 100vh;
+        max-height: none;
+        aspect-ratio: auto;
+        padding: 42px 28px;
+      }
+
+      h1 {
+        font-size: 44px;
+      }
+
+      h2 {
+        font-size: 29px;
+      }
+
+      p,
+      li {
+        font-size: 21px;
+      }
+
+      pre {
+        font-size: 15px;
+      }
+
+      .two-col,
+      .three-col,
+      .flow,
+      .diagram {
+        grid-template-columns: 1fr;
+      }
+
+      .arrow {
+        display: none;
+      }
+
+    }
+
+    @media print {
+      html,
+      body {
+        overflow: visible;
+        background: white;
+      }
+
+      .deck {
+        display: block;
+        padding: 0;
+      }
+
+      .slide,
+      .slide.active {
+        display: flex;
+        page-break-after: always;
+        width: 100vw;
+        height: 100vh;
+        max-height: none;
+        box-shadow: none;
+      }
+
+      .hud,
+      .progress {
+        display: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="hud" id="hud">1 / 22</div>
+  <main class="deck" id="deck">
+    <section class="slide title-slide active" data-kicker="crystal-greeter">
+      <div class="eyebrow">tech talk</div>
+      <h1>greeter</h1>
+      <p class="subtitle">A custom Crystal-powered TTY login greeter for launching exactly the sessions this machine needs.</p>
+    </section>
+
+    <section class="slide" data-kicker="why">
+      <h2>Why This Exists</h2>
+      <ul class="large-list">
+        <li>Boot straight into a clean TTY UI.</li>
+        <li>Authenticate real system users through PAM.</li>
+        <li>Launch X11, Wayland, SSH, Moonlight, reboot, and shutdown flows.</li>
+        <li>Keep the whole login path small enough to audit.</li>
+      </ul>
+    </section>
+
+    <section class="slide" data-kicker="product">
+      <h2>The User Flow</h2>
+      <div class="flow">
+        <div>Draw login screen</div>
+        <div>Read username and hidden password</div>
+        <div>Authenticate with PAM</div>
+        <div>Build session menu</div>
+        <div>Fork, drop privileges, exec</div>
+      </div>
+      <p class="speaker-note">After the selected session exits, the greeter returns to the login prompt.</p>
+    </section>
+
+    <section class="slide" data-kicker="stack">
+      <h2>Tech Stack</h2>
+      <div class="three-col">
+        <div class="tile">
+          <h3>Core</h3>
+          <p>Crystal native binary, static types, Ruby-like syntax, small source tree.</p>
+        </div>
+        <div class="tile">
+          <h3>System</h3>
+          <p>Linux-PAM, LibC FFI, fork/waitpid, setuid/setgid, terminal ioctl.</p>
+        </div>
+        <div class="tile">
+          <h3>Ops</h3>
+          <p>Nix flake, NixOS module, systemd service, journald JSONL logs.</p>
+        </div>
+      </div>
+      <div class="tag-row">
+        <span class="tag">Crystal</span>
+        <span class="tag">PAM</span>
+        <span class="tag">TTY</span>
+        <span class="tag">NixOS</span>
+        <span class="tag">systemd</span>
+        <span class="tag">YAML</span>
+      </div>
+    </section>
+
+    <section class="slide" data-kicker="repo">
+      <h2>Repository Map</h2>
+      <pre>src/greeter.cr          main loop, login flow, menu dispatch
+src/auth.cr             PAM authentication
+src/sessions.cr         X11, Wayland, SSH session launch
+src/terminal.cr         TTY rendering and input
+src/config.cr           YAML config and menu parsing
+src/platform.cr         platform paths and machine data
+src/libs.cr             PAM and LibC bindings
+src/session_tracker.cr  X11 child tracking and VT allocation
+src/logger.cr           JSONL operational logs</pre>
+    </section>
+
+    <section class="slide" data-kicker="boundary">
+      <h2>Core Design Choice</h2>
+      <div class="diagram">
+        <div class="node">
+          <strong>root greeter</strong>
+          <span>Owns the TTY UI and can authenticate the next login.</span>
+        </div>
+        <div class="arrow">=&gt;</div>
+        <div class="node">
+          <strong>user session child</strong>
+          <span>Drops groups, GID, UID, then execs the selected session.</span>
+        </div>
+      </div>
+      <pre>initgroups(user, gid)
+setgid(gid)
+setuid(uid)
+exec(session)</pre>
+    </section>
+
+    <section class="slide" data-kicker="pam">
+      <h2>Authentication</h2>
+      <ul>
+        <li>Uses custom Crystal FFI bindings to Linux-PAM.</li>
+        <li>Starts the <code>login</code> PAM service.</li>
+        <li>Supplies the password through a PAM conversation callback.</li>
+        <li>Runs <code>pam_authenticate</code> and <code>pam_acct_mgmt</code>.</li>
+        <li>Returns a live PAM handle for session setup.</li>
+      </ul>
+      <p class="speaker-note">The password is used for the callback and is not written to logs.</p>
+    </section>
+
+    <section class="slide" data-kicker="sessions">
+      <h2>Session Discovery</h2>
+      <div class="two-col">
+        <div>
+          <h3>Scan</h3>
+          <ul>
+            <li><code>xsessions</code> directories</li>
+            <li><code>wayland-sessions</code> directories</li>
+            <li>NixOS and conventional Linux paths</li>
+          </ul>
+        </div>
+        <div>
+          <h3>Parse</h3>
+          <ul>
+            <li><code>Name=</code></li>
+            <li><code>Exec=</code></li>
+            <li>strip desktop field codes</li>
+          </ul>
+        </div>
+      </div>
+      <pre>Openbox (X11)
+niri (Wayland)</pre>
+    </section>
+
+    <section class="slide" data-kicker="x11">
+      <h2>X11 Launch Model</h2>
+      <pre>greeter tty1
+  |
+  +-- supervisor child, still root
+        |
+        +-- pam_open_session
+        +-- worker child
+              |
+              +-- chown tty
+              +-- drop privileges
+              +-- exec startx &lt;wm&gt; -- :display vtN
+        |
+        +-- wait
+        +-- pam_close_session</pre>
+      <p>Current pool: <code>tty3</code> through <code>tty7</code>.</p>
+    </section>
+
+    <section class="slide" data-kicker="x11">
+      <h2>Why X11 Gets a Supervisor</h2>
+      <ul>
+        <li>The long-lived greeter parent should not own the user's graphical PAM session.</li>
+        <li>The supervisor owns <code>pam_open_session</code>, the worker, and <code>pam_close_session</code>.</li>
+        <li>The parent records the supervisor PID and immediately returns to the prompt.</li>
+        <li>That allows multiple X11 sessions to stay active at once.</li>
+      </ul>
+    </section>
+
+    <section class="slide" data-kicker="wayland">
+      <h2>Wayland Launch Model</h2>
+      <pre>greeter
+  |
+  +-- pam_open_session
+  +-- fork child
+        |
+        +-- chown tty
+        +-- ensure runtime dir when needed
+        +-- drop privileges
+        +-- exec compositor/session
+  |
+  +-- wait
+  +-- pam_close_session</pre>
+      <p>This path blocks the greeter until the compositor exits.</p>
+    </section>
+
+    <section class="slide" data-kicker="actions">
+      <h2>Static Actions</h2>
+      <div class="three-col">
+        <div class="tile"><h3>Power</h3><p><code>reboot</code> and <code>shutdown</code> exec system power commands.</p></div>
+        <div class="tile"><h3>Remote</h3><p><code>ssh</code> prompts for a host and logs in as the authenticated user.</p></div>
+        <div class="tile"><h3>Streaming</h3><p><code>moonlight</code> runs with <code>SDL_VIDEODRIVER=kmsdrm</code>, no X server required.</p></div>
+      </div>
+    </section>
+
+    <section class="slide" data-kicker="env">
+      <h2>Runtime Environment</h2>
+      <ul>
+        <li>Sessions launch with <code>clear_env: true</code>.</li>
+        <li>Identity is rebuilt: <code>HOME</code>, <code>USER</code>, <code>LOGNAME</code>, <code>SHELL</code>.</li>
+        <li>Paths include user profile, Nix profile, system profile, wrappers.</li>
+        <li>Logind gets <code>XDG_SESSION_TYPE</code>, <code>XDG_SEAT</code>, and <code>XDG_VTNR</code>.</li>
+        <li>User services get <code>XDG_RUNTIME_DIR</code>, D-Bus, and Pulse/PipeWire endpoints.</li>
+      </ul>
+    </section>
+
+    <section class="slide" data-kicker="tty">
+      <h2>TTY User Interface</h2>
+      <div class="two-col">
+        <div>
+          <ul>
+            <li>Raw ANSI screen drawing.</li>
+            <li>Responsive terminal-width layout.</li>
+            <li>Noncanonical input for password masking.</li>
+            <li><code>Ctrl+L</code> toggles <code>us</code> and <code>dvorak</code> console keymaps.</li>
+          </ul>
+        </div>
+        <div class="terminal">
+          <span class="warn">+------------------+</span><br>
+          <span class="warn">| WMB Greeter&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; |</span><br>
+          <span class="warn">+------------------+</span><br>
+          <span class="dim">layout: us</span><br>
+          login: wmb<br>
+          Password: ********<br><br>
+          <span class="good">Hi, wmb.</span><br>
+          1) Openbox (X11)<br>
+          2) niri (Wayland)<br>
+          3) ssh
+        </div>
+      </div>
+    </section>
+
+    <section class="slide" data-kicker="config">
+      <h2>Config Surface</h2>
+      <pre>title: "WMB Greeter"
+vt: 1
+seat: seat0
+default_keyboard_layout: us
+
+xsession_dirs:
+  - /run/current-system/sw/share/xsessions
+
+wayland_session_dirs:
+  - /run/current-system/sw/share/wayland-sessions
+
+menu:
+  - action: ssh
+  - action: moonlight
+    host: desktop.wmb.arpa</pre>
+    <p>Missing or invalid config falls back to compiled defaults.</p>
+    </section>
+
+    <section class="slide" data-kicker="nix">
+      <h2>Packaging And Deployment</h2>
+      <div class="two-col">
+        <div>
+          <h3>Flake</h3>
+          <ul>
+            <li>release package</li>
+            <li>NixOS module</li>
+            <li>development shell</li>
+            <li>test VM</li>
+          </ul>
+        </div>
+        <div>
+          <h3>NixOS Module</h3>
+          <ul>
+            <li>generates <code>/etc/greeter.conf</code></li>
+            <li>installs setuid-root wrapper</li>
+            <li>disables getty on the chosen VT</li>
+            <li>runs as a systemd service</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide" data-kicker="logs">
+      <h2>Observability</h2>
+      <pre>{
+  "timestamp": "2026-09-06T12:00:00.000Z",
+  "level": "info",
+  "event": "session.x11.starting",
+  "message": "Starting X11 session",
+  "fields": {
+    "username": "alice",
+    "vt": 3,
+    "display": 0
+  }
+}</pre>
+      <p><code>journalctl -u crystal-greeter.service -o cat</code></p>
+    </section>
+
+    <section class="slide" data-kicker="tests">
+      <h2>Testing Today</h2>
+      <ul>
+        <li>Logger JSONL shape and severity helpers.</li>
+        <li>Logger failure isolation.</li>
+        <li>Keyboard layout config parsing.</li>
+        <li>Fallback behavior for invalid keyboard layouts.</li>
+        <li>NixOS VM for manual PAM/session testing.</li>
+      </ul>
+    </section>
+
+    <section class="slide" data-kicker="limits">
+      <h2>Limitations</h2>
+      <ul class="compact">
+        <li>Linux is the practical target; session integration is Linux-centric.</li>
+        <li>NixOS assumptions are baked into paths, wrappers, and service setup.</li>
+        <li>The binary must run as root or setuid-root.</li>
+        <li>PAM bindings are hand-written FFI, so ABI correctness matters.</li>
+        <li><code>.desktop</code> parsing is intentionally minimal.</li>
+        <li>Wayland, SSH, and Moonlight sessions block the greeter.</li>
+        <li>X11 concurrency is capped at five sessions.</li>
+      </ul>
+    </section>
+
+    <section class="slide" data-kicker="limits">
+      <h2>More Limitations</h2>
+      <ul class="compact">
+        <li>Static config is loaded only at startup.</li>
+        <li>No graphical accessibility features.</li>
+        <li>No localization.</li>
+        <li>No username chooser or avatar model.</li>
+        <li>No account/session policy UI beyond PAM and configured menu actions.</li>
+        <li>No automated integration tests for real PAM, logind, TTY ownership, Xorg, or Wayland.</li>
+      </ul>
+    </section>
+
+    <section class="slide" data-kicker="security">
+      <h2>Security Boundaries</h2>
+      <div class="two-col">
+        <div>
+          <h3>Strong Parts</h3>
+          <ul class="compact">
+            <li>No shell for X session execution.</li>
+            <li>Explicit privilege drop before user exec.</li>
+            <li>Environment is cleared and rebuilt.</li>
+            <li>PAM account management is checked.</li>
+            <li>Logs avoid passwords.</li>
+          </ul>
+        </div>
+        <div>
+          <h3>Risk Areas</h3>
+          <ul class="compact">
+            <li>Root/setuid attack surface.</li>
+            <li>Direct TTY ownership changes.</li>
+            <li>Manual C ABI bindings.</li>
+            <li>Session commands from <code>.desktop</code> files and local config.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide" data-kicker="architecture">
+      <h2>Architecture In One Slide</h2>
+      <pre>TTY + ANSI UI
+    |
+Config + session discovery
+    |
+PAM auth + passwd lookup
+    |
+Menu dispatch
+    |
+    +-- X11: supervisor + VT pool + startx
+    +-- Wayland: direct compositor exec on greeter VT
+    +-- SSH: user shell command on TTY
+    +-- Moonlight: KMS/DRM streaming session
+    +-- Power actions: systemctl
+    |
+JSONL logs to journald</pre>
+    </section>
+
+    <section class="slide" data-kicker="talk track">
+      <h2>Talk Track</h2>
+      <ol class="compact">
+        <li>The problem: display managers are big; this machine needed a focused launcher.</li>
+        <li>Why Crystal: native binary, typed, readable, FFI-friendly.</li>
+        <li>The key boundary: root parent, unprivileged session child.</li>
+        <li>The hard parts: PAM, logind, environment, VT ownership.</li>
+        <li>The design split: async X11, blocking direct sessions.</li>
+        <li>The honest finish: limitations and hardening work.</li>
+      </ol>
+    </section>
+
+    <section class="slide" data-kicker="closing">
+      <div class="eyebrow">closing</div>
+      <h1>Small enough to audit. Custom enough to matter.</h1>
+      <p class="subtitle"><code>greeter</code> does not try to replace every display manager. It makes one machine's login path visible, understandable, and precise.</p>
+    </section>
+  </main>
+  <div class="progress" aria-hidden="true"><span id="progress"></span></div>
+
+  <script>
+    const slides = Array.from(document.querySelectorAll(".slide"));
+    const hud = document.getElementById("hud");
+    const progress = document.getElementById("progress");
+    let index = Number(new URLSearchParams(location.search).get("slide")) - 1;
+
+    if (!Number.isInteger(index) || index < 0 || index >= slides.length) {
+      index = 0;
+    }
+
+    function show(nextIndex) {
+      index = Math.max(0, Math.min(slides.length - 1, nextIndex));
+      slides.forEach((slide, i) => slide.classList.toggle("active", i === index));
+      hud.textContent = `${index + 1} / ${slides.length}`;
+      progress.style.width = `${((index + 1) / slides.length) * 100}%`;
+
+      const url = new URL(location.href);
+      url.searchParams.set("slide", String(index + 1));
+      history.replaceState(null, "", url);
+    }
+
+    function next() {
+      show(index + 1);
+    }
+
+    function previous() {
+      show(index - 1);
+    }
+
+    document.addEventListener("keydown", (event) => {
+      if (["ArrowRight", "PageDown", " ", "Enter"].includes(event.key)) {
+        event.preventDefault();
+        next();
+      } else if (["ArrowLeft", "PageUp", "Backspace"].includes(event.key)) {
+        event.preventDefault();
+        previous();
+      } else if (event.key === "Home") {
+        event.preventDefault();
+        show(0);
+      } else if (event.key === "End") {
+        event.preventDefault();
+        show(slides.length - 1);
+      } else if (event.key.toLowerCase() === "f") {
+        document.documentElement.requestFullscreen?.();
+      }
+    });
+
+    document.addEventListener("click", (event) => {
+      if (event.shiftKey) {
+        previous();
+      } else {
+        next();
+      }
+    });
+
+    show(index);
+  </script>
+</body>
+</html>

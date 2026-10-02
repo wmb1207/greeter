@@ -1,34 +1,18 @@
-require "./libs"
-require "./logger"
-
 module SessionTracker
   FIRST_VT = 3
-  LAST_VT  = 7  # pool: vt3..vt7 (5 concurrent graphical sessions)
+  LAST_VT  = 7 # pool: vt3..vt7 (5 concurrent graphical sessions)
 
   struct Entry
-    getter vt       : Int32
-    getter display  : Int32
+    getter vt : Int32
+    getter display : Int32
     getter username : String
 
     def initialize(@vt, @display, @username)
     end
   end
 
-  struct Reaped
-    getter pid    : Int32
-    getter entry  : Entry
-    getter status : Int32
-
-    def initialize(@pid, @entry, @status)
-    end
-  end
-
+  # pid of the per-login X11 supervisor => the slot it occupies.
   @@table = {} of Int32 => Entry
-  @@reap_requested = false
-
-  def self.request_reap
-    @@reap_requested = true
-  end
 
   def self.next_vt : Int32?
     used = @@table.values.map(&.vt).to_set
@@ -39,31 +23,18 @@ module SessionTracker
     @@table[pid] = entry
   end
 
-  # Reap all finished children without blocking. Returns every (pid, entry)
-  # pair that was in the table so callers can close the PAM session.
-  def self.reap_all : Array(Reaped)
-    @@reap_requested = false
-    found = [] of Reaped
-    raw = 0_i32
-    loop do
-      pid = LibC.waitpid(-1, pointerof(raw), LibC::WNOHANG)
-      break if pid <= 0
-      if (e = @@table.delete(pid))
-        found << Reaped.new(pid, e, raw)
-      end
-    end
-    found
-  end
-
-  def self.reap_requested? : Bool
-    @@reap_requested
+  # Free the slots of supervisors that have exited.
+  #
+  # Crystal's runtime always owns SIGCHLD: it reaps every child with
+  # waitpid(-1, WNOHANG) before any user handler runs, so calling waitpid
+  # here would race it and lose exits (leaking slots).  Instead we let the
+  # runtime reap and only ask whether the pid is still alive.  The supervisor
+  # logs its own exit status before it terminates.
+  def self.prune_finished : Nil
+    @@table.reject! { |pid, _| !Process.exists?(pid) }
   end
 
   def self.capacity : Int32
     LAST_VT - FIRST_VT + 1
-  end
-
-  def self.size : Int32
-    @@table.size
   end
 end

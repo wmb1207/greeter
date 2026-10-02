@@ -1,5 +1,6 @@
 require "signal"
 require "io/console"
+require "./logger"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LibPAM — FFI bindings for Linux-PAM
@@ -23,6 +24,13 @@ lib LibPAM
   PAM_PROMPT_ECHO_ON  = 2 # visible prompt → other credentials
   PAM_ERROR_MSG       = 3
   PAM_TEXT_INFO       = 4
+
+  PAM_BUF_ERR  =  5
+  PAM_CONV_ERR = 19
+
+  # pam_setcred(3) flags.
+  PAM_ESTABLISH_CRED = 0x0002
+  PAM_DELETE_CRED    = 0x0004
 
   # One message PAM sends to the application (e.g. "Password: ").
   struct PamMessage
@@ -50,6 +58,7 @@ lib LibPAM
                 conv : PamConv*, pamh : PamHandle*) : Int32
   fun pam_authenticate(pamh : PamHandle, flags : Int32) : Int32
   fun pam_acct_mgmt(pamh : PamHandle, flags : Int32) : Int32
+  fun pam_setcred(pamh : PamHandle, flags : Int32) : Int32
   fun pam_open_session(pamh : PamHandle, flags : Int32) : Int32
   fun pam_close_session(pamh : PamHandle, flags : Int32) : Int32
   fun pam_end(pamh : PamHandle, status : Int32) : Int32
@@ -73,11 +82,6 @@ end
 # ═══════════════════════════════════════════════════════════════════════════════
 
 lib LibC
-  # Crystal's stdlib ships only getpwnam_r; we bind the simpler getpwnam
-  # because this greeter is single-threaded and simplicity matters more.
-  # LibC::Passwd is already defined by the stdlib (pulled in via io/console).
-  fun getpwnam(name : Char*) : Passwd*
-
   # setuid is in stdlib unistd.cr; setgid is not — declare both for safety.
   fun setgid(gid : UInt32) : Int
   fun setuid(uid : UInt32) : Int
@@ -137,8 +141,14 @@ end
 # stdlib are available — including Box.
 #
 # On Linux-PAM, `msgs` is PamMessage** — msgs[i] is a PamMessage*.
-# We allocate the response array with malloc; PAM takes ownership and
+# We allocate the response array with calloc; PAM takes ownership and
 # will free() each resp string as well as the array itself.
+#
+# Only PAM_PROMPT_ECHO_OFF is answered (with the password).  A visible prompt
+# (OTP, username, …) cannot be answered by this greeter, so the conversation
+# fails with PAM_CONV_ERR instead of leaking the password to it.
+# PAM_ERROR_MSG / PAM_TEXT_INFO ("account locked", "password expires in…")
+# are logged.
 
 fun pam_conversation(
   num_msg : Int32,
@@ -146,28 +156,50 @@ fun pam_conversation(
   resps_out : LibPAM::PamResponse**,
   appdata : Void*,
 ) : Int32
+  return LibPAM::PAM_CONV_ERR if num_msg <= 0
+
   password = Box(String).unbox(appdata)
   # Allocate with the system calloc so PAM can safely free() this array.
   # Using Crystal's Pointer(T).malloc here would allocate via Boehm GC,
   # which is incompatible with the libc free() PAM calls on cleanup.
-  resps = LibC.calloc(num_msg.to_u64, sizeof(LibPAM::PamResponse))
-    .as(Pointer(LibPAM::PamResponse))
+  raw = LibC.calloc(num_msg.to_u64, sizeof(LibPAM::PamResponse))
+  return LibPAM::PAM_BUF_ERR if raw.null?
+  resps = raw.as(Pointer(LibPAM::PamResponse))
 
   num_msg.times do |i|
-    r = resps + i
-    style = msgs[i].value.msg_style # msgs[i] → PamMessage*, .value → PamMessage
+    msg = msgs[i].value # msgs[i] → PamMessage*, .value → PamMessage
+    text = msg.msg.null? ? "" : String.new(msg.msg)
 
-    if style == LibPAM::PAM_PROMPT_ECHO_OFF || style == LibPAM::PAM_PROMPT_ECHO_ON
-      # Supply the password.  strdup because PAM will free() this string.
-      r.value.resp = LibC.strdup(password)
-      r.value.resp_retcode = 0
+    case msg.msg_style
+    when LibPAM::PAM_PROMPT_ECHO_OFF
+      # strdup because PAM will free() this string.
+      resp = LibC.strdup(password)
+      if resp.null?
+        pam_free_responses(resps, i)
+        return LibPAM::PAM_BUF_ERR
+      end
+      resps[i].resp = resp
+    when LibPAM::PAM_ERROR_MSG
+      Logger.warn("auth.pam_message", "PAM error message", {text: text})
+    when LibPAM::PAM_TEXT_INFO
+      Logger.info("auth.pam_message", "PAM info message", {text: text})
     else
-      # Info/error message from PAM — no response needed.
-      r.value.resp = Pointer(UInt8).null
-      r.value.resp_retcode = 0
+      Logger.warn("auth.pam_prompt_unsupported", "PAM prompt cannot be answered", {style: msg.msg_style, text: text})
+      pam_free_responses(resps, i)
+      return LibPAM::PAM_CONV_ERR
     end
   end
 
   resps_out.value = resps
   LibPAM::PAM_SUCCESS
+end
+
+# Release the first `count` responses and the array itself on a failed
+# conversation (PAM only takes ownership when we return PAM_SUCCESS).
+def pam_free_responses(resps : LibPAM::PamResponse*, count : Int32) : Nil
+  count.times do |i|
+    resp = resps[i].resp
+    LibC.free(resp.as(Void*)) unless resp.null?
+  end
+  LibC.free(resps.as(Void*))
 end

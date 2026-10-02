@@ -138,7 +138,9 @@ module Terminal
     prompt_text = "#{prompt} "
     prompt_col = prompt_text.size + 1
     input_width = [panel_width - prompt_text.size, 1].max
-    buffer = String.build { }
+    buffer = ""
+    # Bytes of a UTF-8 sequence that is not complete yet.
+    pending = IO::Memory.new
 
     STDOUT.print "\e[#{row};1H#{Colors::PROMPT}#{prompt}#{Colors::RESET} "
     STDOUT.print " " * input_width
@@ -161,13 +163,20 @@ module Terminal
           redraw_input(row, prompt_col, input_width, buffer, hidden)
         when BACKSPACE, DELETE
           unless buffer.empty?
-            buffer = buffer[0, buffer.size - 1]
+            buffer = buffer.rchop
             redraw_input(row, prompt_col, input_width, buffer, hidden)
           end
         else
           next if byte < 32
-          buffer += byte.chr
-          redraw_input(row, prompt_col, input_width, buffer, hidden)
+          pending.write_byte(byte)
+          chunk = String.new(pending.to_slice)
+          if chunk.valid_encoding?
+            buffer += chunk
+            pending.clear
+            redraw_input(row, prompt_col, input_width, buffer, hidden)
+          elsif pending.size >= 4
+            pending.clear # not valid UTF-8; drop it
+          end
         end
       end
     end

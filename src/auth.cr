@@ -1,14 +1,19 @@
 require "./result"
 require "./libs"
 require "./logger"
+require "./account"
 
 module Auth
   struct LoginSession
     getter username : String
-    getter pw : LibC::Passwd
+    getter account : Account
     getter pamh : LibPAM::PamHandle
+    # Keeps the conversation's appdata (the boxed password) reachable for as
+    # long as this handle may still call back into pam_conversation, e.g. a
+    # module prompting during pam_open_session.  Never read directly.
+    @conv_data : Void*
 
-    def initialize(@username : String, @pw : LibC::Passwd, @pamh : LibPAM::PamHandle)
+    def initialize(@username : String, @account : Account, @pamh : LibPAM::PamHandle, @conv_data : Void*)
     end
   end
 
@@ -22,22 +27,27 @@ module Auth
 
   alias LoginSessionResult = Result(LoginSession)
 
-  def self.auth(creds : Credentials) : LoginSessionResult
-    pamh = do_auth(creds.username, creds.password)
-    return LoginSessionResult.error("Login incorrect.") unless pamh
+  # `tty` is set as PAM_TTY before authentication so modules such as
+  # pam_securetty and pam_faillock see the terminal the login came from.
+  def self.auth(creds : Credentials, tty : String?) : LoginSessionResult
+    started = do_auth(creds.username, creds.password, tty)
+    return LoginSessionResult.error("Login incorrect.") unless started
+    pamh, conv_data = started
 
-    pw = find_user(creds.username)
-    unless pw
+    account = Account.find(creds.username)
+    unless account
       Logger.error("auth.passwd_entry_missing", "Authenticated user has no passwd entry", {username: creds.username})
+      LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
       return LoginSessionResult.error("Greeter: No passwd entry for '#{creds.username}'")
     end
 
-    Logger.info("auth.succeeded", "Authentication succeeded", {username: creds.username, uid: pw.pw_uid})
+    Logger.info("auth.succeeded", "Authentication succeeded", {username: creds.username, uid: account.uid})
 
     LoginSessionResult.ok(LoginSession.new(
       username: creds.username,
-      pw: pw,
-      pamh: pamh
+      account: account,
+      pamh: pamh,
+      conv_data: conv_data
     ))
   end
 
@@ -45,10 +55,11 @@ module Auth
   # PAM authentication
   # ═══════════════════════════════════════════════════════════════════════════════
   # Authenticate username + password against the "login" PAM service.
-  # Returns the live PamHandle on success so the caller can open a session
-  # with it; returns nil on any failure (pam_end is called internally).
+  # Returns the live PamHandle plus the boxed conversation data on success so
+  # the caller can open a session with it; returns nil on any failure
+  # (pam_end is called internally).
   # The password is never written to disk or to any log.
-  private def self.do_auth(username : String, password : String) : LibPAM::PamHandle?
+  private def self.do_auth(username : String, password : String, tty : String?) : {LibPAM::PamHandle, Void*}?
     box = Box.box(password)
     conv = LibPAM::PamConv.new
     conv.conv = ->pam_conversation(Int32, Pointer(Pointer(LibPAM::PamMessage)), Pointer(Pointer(LibPAM::PamResponse)), Pointer(Void))
@@ -59,6 +70,8 @@ module Auth
       Logger.error("auth.pam_start_failed", "PAM transaction could not start", {username: username, pam_code: ret})
       return nil
     end
+
+    LibPAM.pam_set_item(pamh, LibPAM::PAM_TTY, tty.to_unsafe.as(Void*)) if tty
 
     # Step 1: verify the supplied credentials.
     ret = LibPAM.pam_authenticate(pamh, 0)
@@ -76,7 +89,7 @@ module Auth
       return nil
     end
 
-    # Return the live handle — caller must call pam_close_session + pam_end.
-    pamh
+    # Return the live handle — caller must open/close the session and pam_end.
+    {pamh, box}
   end
 end

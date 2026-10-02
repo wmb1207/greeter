@@ -1,4 +1,4 @@
-2 # crystal-greeter: minimal TTY-based login greeter for Linux
+# crystal-greeter: minimal TTY-based login greeter for Linux
 #
 # Flow:  prompt username → prompt password (hidden) → PAM auth →
 #        session menu → fork+exec startx/fvwm3 → wait → repeat
@@ -10,8 +10,8 @@
 # Install: make install   (sets setuid bit)
 
 require "signal"
-# require "io/console"   # pulls in LibC::Termios, ECHO, TCSANOW, tcgetattr, tcsetattr
 require "./libs"
+require "./account"
 require "./auth"
 require "./terminal"
 require "./sessions"
@@ -23,51 +23,6 @@ require "./platform"
 require "./keyboard_layout"
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# User lookup
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def find_user(username : String) : LibC::Passwd?
-  ptr = LibC.getpwnam(username)
-  ptr.null? ? nil : ptr.value
-end
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Privilege dropping
-# ═══════════════════════════════════════════════════════════════════════════════
-#
-# Order is mandatory: initgroups → setgid → setuid.
-# setuid must come last: once a process drops to an unprivileged UID it can
-# no longer alter its GID or supplementary groups on Linux.
-
-def drop_privileges(pw : LibC::Passwd) : Bool
-  if LibC.initgroups(pw.pw_name, pw.pw_gid) != 0
-    Logger.error("privileges.initgroups_failed", "Could not initialize supplementary groups", {uid: pw.pw_uid})
-    return false
-  end
-  if LibC.setgid(pw.pw_gid) != 0
-    Logger.error("privileges.setgid_failed", "Could not set process gid", {uid: pw.pw_uid, gid: pw.pw_gid})
-    return false
-  end
-  if LibC.setuid(pw.pw_uid) != 0
-    Logger.error("privileges.setuid_failed", "Could not set process uid", {uid: pw.pw_uid})
-    return false
-  end
-  true
-end
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Session launch
-# ═══════════════════════════════════════════════════════════════════════════════
-#
-# We fork() so the child can drop privileges without touching the greeter
-# process.  startx is exec'd as an array of arguments — no shell is involved,
-# so there is no possibility of command injection regardless of the username
-# or home directory values.
-#
-# The parent blocks in child.wait until the X session terminates, then
-# returns to the greeter loop.
-
-# ═══════════════════════════════════════════════════════════════════════════════
 # Moonlight streaming session
 # ═══════════════════════════════════════════════════════════════════════════════
 #
@@ -75,57 +30,44 @@ end
 # — no X server needed.  PAM session is still opened so logind registers the
 # session and creates /run/user/<uid> (needed for PipeWire audio).
 
-def launch_moonlight(pw : LibC::Passwd, pamh : LibPAM::PamHandle, host : String)
-  user = String.new(pw.pw_name)
-  home = String.new(pw.pw_dir)
-  shell = String.new(pw.pw_shell)
-
-  session_path = Platform.session_path(home, user)
+def launch_moonlight(account : Account, pamh : LibPAM::PamHandle, host : String)
+  user = account.name
+  session_path = Platform.session_path(account.home, user)
 
   moonlight_cmd = session_path.split(":")
     .flat_map { |d| ["#{d}/moonlight", "#{d}/moonlight-qt"] }
     .find { |p| File::Info.executable?(p) }
   if moonlight_cmd.nil?
-    Logger.error("session.moonlight.command_missing", "moonlight command not found in session PATH", {username: user, uid: pw.pw_uid, host: host})
+    Logger.error("session.moonlight.command_missing", "moonlight command not found in session PATH", {username: user, uid: account.uid, host: host})
     LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
     return
   end
-  Logger.debug("session.moonlight.command_resolved", "Resolved moonlight command", {username: user, uid: pw.pw_uid, command: moonlight_cmd})
+  Logger.debug("session.moonlight.command_resolved", "Resolved moonlight command", {username: user, uid: account.uid, command: moonlight_cmd})
 
-  tty_path_str = LibC.ttyname(STDIN.fd)
-  tty_str = tty_path_str.null? ? Platform.tty_path(1) : String.new(tty_path_str)
-  tty_str.to_unsafe.as(Void*).tap do |ptr|
-    LibPAM.pam_set_item(pamh, LibPAM::PAM_TTY, ptr)
-  end
+  tty = Platform.current_tty || Platform.tty_path(1)
+  LibPAM.pam_set_item(pamh, LibPAM::PAM_TTY, tty.to_unsafe.as(Void*))
   ["XDG_SESSION_TYPE=x11", "XDG_SESSION_CLASS=user",
    "XDG_SEAT=seat0", "XDG_VTNR=1"].each do |kv|
     LibPAM.pam_putenv(pamh, kv)
   end
 
-  ret = LibPAM.pam_open_session(pamh, 0)
+  ret = Sessions.open_pam_session(pamh)
   if ret != LibPAM::PAM_SUCCESS
-    Logger.error("session.moonlight.pam_open_failed", "PAM session could not open", {username: user, uid: pw.pw_uid, host: host, pam_code: ret})
+    Logger.error("session.moonlight.pam_open_failed", "PAM session could not open", {username: user, uid: account.uid, host: host, pam_code: ret})
+    LibPAM.pam_end(pamh, ret)
+    return
   end
 
   pam_env = {} of String => String
-  envlist = LibPAM.pam_getenvlist(pamh)
-  unless envlist.null?
-    i = 0
-    while !(ptr = envlist[i]).null?
-      pair = String.new(ptr)
-      eq = pair.index('=')
-      pam_env[pair[0...eq]] = pair[(eq + 1)..] if eq
-      i += 1
-    end
-  end
+  Sessions.env_vars_from_pam(pamh) { |k, v| pam_env[k] = v }
 
   env = {
-    "HOME"             => home,
+    "HOME"             => account.home,
     "USER"             => user,
-    "SHELL"            => shell,
+    "SHELL"            => account.shell,
     "LOGNAME"          => user,
     "PATH"             => session_path,
-    "XDG_RUNTIME_DIR"  => Platform.runtime_dir(pw.pw_uid),
+    "XDG_RUNTIME_DIR"  => Platform.runtime_dir(account.uid),
     "XDG_SESSION_TYPE" => "x11",
     "XDG_SEAT"         => "seat0",
     "XDG_VTNR"         => "1",
@@ -134,51 +76,24 @@ def launch_moonlight(pw : LibC::Passwd, pamh : LibPAM::PamHandle, host : String)
   }
   pam_env.each { |k, v| env[k] ||= v }
 
-  Logger.info("session.moonlight.starting", "Starting Moonlight session", {username: user, uid: pw.pw_uid, host: host})
+  Logger.info("session.moonlight.starting", "Starting Moonlight session", {username: user, uid: account.uid, host: host})
 
   pid = LibC.fork
   if pid == 0
-    tty_path = LibC.ttyname(STDIN.fd)
-    unless tty_path.null?
-      LibC.chown(tty_path, pw.pw_uid, pw.pw_gid)
-    end
-
-    unless drop_privileges(pw)
-      Logger.error("session.moonlight.privilege_drop_failed", "Privilege drop failed; Moonlight session aborted", {username: user, uid: pw.pw_uid, host: host})
-      exit 1
-    end
-    Dir.cd(home)
-
-    begin
-      Process.exec(
-        command: moonlight_cmd,
-        args: ["stream", host, "Desktop"],
-        env: env,
-        clear_env: true
-      )
-    rescue ex
-      Logger.error("session.moonlight.exec_failed", "Could not exec moonlight", {username: user, uid: pw.pw_uid, host: host, error: ex.message})
-      exit 1
+    Sessions.in_child("session.moonlight.exec_failed") do
+      Sessions.prepare_user_child(account, tty)
+      Process.exec(command: moonlight_cmd, args: ["stream", host, "Desktop"], env: env, clear_env: true)
     end
   elsif pid < 0
-    Logger.error("session.moonlight.fork_failed", "Could not fork Moonlight session", {username: user, uid: pw.pw_uid, host: host})
-    LibPAM.pam_close_session(pamh, 0)
-    LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
+    Logger.error("session.moonlight.fork_failed", "Could not fork Moonlight session", {username: user, uid: account.uid, host: host})
+    Sessions.close_pam_session(pamh)
     return
   end
 
-  raw_status = 0_i32
-  LibC.waitpid(pid, pointerof(raw_status), 0)
-  exited = (raw_status & 0x7f) == 0
-  exit_code = (raw_status >> 8) & 0xff
-  if exited && exit_code == 0
-    Logger.info("session.moonlight.ended", "Moonlight session ended", {username: user, uid: pw.pw_uid, host: host, exit_code: exit_code})
-  else
-    Logger.warn("session.moonlight.ended", "Moonlight session exited abnormally", {username: user, uid: pw.pw_uid, host: host, exit_code: exit_code})
-  end
-
-  LibPAM.pam_close_session(pamh, 0)
-  LibPAM.pam_end(pamh, LibPAM::PAM_SUCCESS)
+  status = Sessions.wait_child(pid)
+  Sessions.close_pam_session(pamh)
+  Platform.restore_tty(tty)
+  Sessions.log_session_end("moonlight", status, {username: user, uid: account.uid, host: host})
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -205,37 +120,6 @@ end
 
 Signal::INT.trap { STDOUT.print "\e[8;1H[^C — back to login]\e[9;1H"; STDOUT.flush }
 
-Signal::CHLD.trap { SessionTracker.request_reap }
-
-def reap_finished_x11_sessions
-  return unless SessionTracker.reap_requested? || SessionTracker.size > 0
-
-  SessionTracker.reap_all.each do |reaped|
-    entry = reaped.entry
-    status = reaped.status
-    exited = (status & 0x7f) == 0
-    exit_code = (status >> 8) & 0xff
-    signal = status & 0x7f
-
-    if exited && exit_code == 0
-      Logger.info("session.x11.ended", "X11 session ended", {
-        username: entry.username, vt: entry.vt, display: entry.display,
-        pid: reaped.pid, exit_code: exit_code,
-      })
-    elsif exited
-      Logger.warn("session.x11.ended", "X11 session exited abnormally", {
-        username: entry.username, vt: entry.vt, display: entry.display,
-        pid: reaped.pid, exit_code: exit_code,
-      })
-    else
-      Logger.warn("session.x11.ended", "X11 session terminated by signal", {
-        username: entry.username, vt: entry.vt, display: entry.display,
-        pid: reaped.pid, signal: signal,
-      })
-    end
-  end
-end
-
 class Greeter
   def initialize(@config : Config)
     @keyboard_layout = @config.default_keyboard_layout
@@ -248,7 +132,7 @@ class Greeter
   end
 
   private def do_run : Action
-    reap_finished_x11_sessions
+    SessionTracker.prune_finished
 
     keymap_result = Platform.apply_keymap(@keyboard_layout)
     Terminal.prepare_display
@@ -273,10 +157,10 @@ class Greeter
     return Action::NEXT_ITER unless creds_result.is_ok?
 
     username, password, @keyboard_layout = creds_result.value.not_nil!
-    authenticated_result = Auth.auth(Auth::Credentials.new(
-      username: username,
-      password: password
-    ))
+    authenticated_result = Auth.auth(
+      Auth::Credentials.new(username: username, password: password),
+      Platform.current_tty
+    )
 
     if !authenticated_result.is_ok?
       msg = authenticated_result.error.not_nil!
@@ -346,7 +230,7 @@ class Greeter
       session = wm_sessions[idx]
       case session.session_type
       in .x11?
-        reap_finished_x11_sessions
+        SessionTracker.prune_finished
         vt = SessionTracker.next_vt
         if vt.nil?
           STDOUT.print "\e[#{choice_row + 1};1H#{Colors::ERROR}All session slots in use (max #{SessionTracker.capacity}).#{Colors::RESET}"
@@ -355,23 +239,23 @@ class Greeter
           LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
         else
           result = Sessions.launch_session(
-            authenticated.pw, authenticated.pamh,
+            authenticated.account, authenticated.pamh,
             session.exec,
             vt, @config.seat
           )
           unless result.is_ok?
-            Logger.error("session.x11.launch_failed", "X11 session launch failed", {username: authenticated.username, uid: authenticated.pw.pw_uid, error: result.error})
+            Logger.error("session.x11.launch_failed", "X11 session launch failed", {username: authenticated.username, uid: authenticated.account.uid, error: result.error})
             # launch_session already cleaned up pamh on error
           end
         end
       in .wayland?
         result = Sessions.launch_wayland_session(
-          authenticated.pw, authenticated.pamh,
+          authenticated.account, authenticated.pamh,
           session.exec,
           @config.vt, @config.seat
         )
         unless result.is_ok?
-          Logger.error("session.wayland.launch_failed", "Wayland session launch failed", {username: authenticated.username, uid: authenticated.pw.pw_uid, error: result.error})
+          Logger.error("session.wayland.launch_failed", "Wayland session launch failed", {username: authenticated.username, uid: authenticated.account.uid, error: result.error})
         end
       end
     elsif idx >= wm_count && idx < wm_count + config_entries.size
@@ -415,14 +299,14 @@ class Greeter
       if host.empty?
         LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
       else
-        session = Sessions.launch_ssh(authenticated.pw, authenticated.pamh, host)
+        session = Sessions.launch_ssh(authenticated.account, authenticated.pamh, host)
         unless session.is_ok?
-          Logger.error("session.ssh.launch_failed", "SSH session launch failed", {username: authenticated.username, uid: authenticated.pw.pw_uid, host: host, error: session.error})
+          Logger.error("session.ssh.launch_failed", "SSH session launch failed", {username: authenticated.username, uid: authenticated.account.uid, host: host, error: session.error})
           LibPAM.pam_end(authenticated.pamh, LibPAM::PAM_SUCCESS)
         end
       end
     in .moonlight?
-      launch_moonlight(authenticated.pw, authenticated.pamh, entry.host || "localhost")
+      launch_moonlight(authenticated.account, authenticated.pamh, entry.host || "localhost")
     end
   end
 end

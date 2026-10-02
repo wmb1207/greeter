@@ -1,4 +1,7 @@
+require "system/group"
 require "./result"
+require "./libs"
+require "./logger"
 require "./keyboard_layout"
 
 module Platform
@@ -76,6 +79,23 @@ module Platform
     Dir.mkdir_p(dir)
     LibC.chown(dir, uid, gid)
     File.chmod(dir, 0o700)
+  end
+
+  # Path of the terminal on stdin (the greeter's own VT), if any.
+  def self.current_tty : String?
+    path = LibC.ttyname(STDIN.fd)
+    path.null? ? nil : String.new(path)
+  end
+
+  # Hand a VT back to root:tty 0620 after a session on it ends.  Sessions chown
+  # their VT to the user; leaving it that way lets the previous user read the
+  # next login (including the password typed into the greeter).
+  def self.restore_tty(path : String) : Nil
+    tty_gid = System::Group.find_by?(name: "tty").try(&.id.to_u32?) || 0_u32
+    LibC.chown(path, 0, tty_gid)
+    File.chmod(path, 0o620)
+  rescue ex
+    Logger.error("tty.restore_failed", "Could not restore terminal ownership", {path: path, error: ex.message})
   end
 
   def self.reboot_command : Tuple(String, Array(String))
