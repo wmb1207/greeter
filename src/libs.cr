@@ -178,7 +178,8 @@ fun pam_conversation(
         pam_free_responses(resps, i)
         return LibPAM::PAM_BUF_ERR
       end
-      resps[i].resp = resp
+      # Write through the pointer: resps[i] would return a copy of the struct.
+      (resps + i).value.resp = resp
     when LibPAM::PAM_ERROR_MSG
       Logger.warn("auth.pam_message", "PAM error message", {text: text})
     when LibPAM::PAM_TEXT_INFO

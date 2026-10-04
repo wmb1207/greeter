@@ -2,7 +2,7 @@ struct Result(T)
   getter value : T?
   getter error : String?
 
-  def initialize(@value : T?, error : String?)
+  def initialize(@value : T?, @error : String?)
   end
 
   def is_ok?
