@@ -54,8 +54,8 @@ describe Logger do
     Logger.error("error.event", "error")
 
     records = sink.to_s.lines.map { |line| JSON.parse(line) }
-    records.map { |record| record["level"].as_s }.should eq(%w[debug info warn error])
-    records.map { |record| record["event"].as_s }.should eq(%w[debug.event info.event warn.event error.event])
+    records.map(&.["level"].as_s).should eq(%w[debug info warn error])
+    records.map(&.["event"].as_s).should eq(%w[debug.event info.event warn.event error.event])
   end
 
   it "does not propagate sink failures" do

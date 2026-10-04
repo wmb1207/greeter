@@ -1,4 +1,4 @@
-.PHONY: build debug spec install clean
+.PHONY: build debug spec lint install clean
 
 # Release build (optimised, smaller binary)
 build:
@@ -10,6 +10,10 @@ debug:
 
 spec:
 	crystal spec
+
+lint:
+	crystal tool format --check src spec
+	ameba src spec
 
 # Install setuid-root so the binary can call PAM, setuid, setgid
 install: build

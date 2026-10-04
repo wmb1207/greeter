@@ -1,11 +1,10 @@
 require "system/group"
-require "./result"
+require "./failure"
 require "./libs"
 require "./logger"
 require "./keyboard_layout"
 
 module Platform
-  alias CommandResult = Result(Bool)
   alias MachineDetails = Array(Tuple(String, String))
 
   def self.freebsd? : Bool
@@ -106,6 +105,23 @@ module Platform
     freebsd? ? {"shutdown", ["-p", "now"]} : {"systemctl", ["poweroff"]}
   end
 
+  # Replace the greeter with the reboot / power-off command.  Only returns
+  # (with the failure) when the exec fails.
+  def self.reboot : Failure
+    exec_system(*reboot_command)
+  end
+
+  def self.shutdown : Failure
+    exec_system(*shutdown_command)
+  end
+
+  private def self.exec_system(command : String, args : Array(String)) : Failure
+    Process.exec(command, args)
+  rescue ex
+    Logger.error("platform.exec_failed", "Could not run system command", {command: command, error: ex.message})
+    Failure.new("Greeter: #{command} failed")
+  end
+
   def self.loadkeys_command : String?
     [
       "/run/current-system/sw/bin/loadkeys",
@@ -115,21 +131,22 @@ module Platform
     ].find { |path| File::Info.executable?(path) }
   end
 
-  def self.apply_keymap(layout : KeyboardLayout) : CommandResult
+  # Load the console keymap; returns the failure, or nil on success.
+  def self.apply_keymap(layout : KeyboardLayout) : Failure?
     command = loadkeys_command
-    return CommandResult.error("loadkeys command not found") if command.nil?
+    return Failure.new("loadkeys command not found") if command.nil?
 
     output = IO::Memory.new
     error = IO::Memory.new
-    status = Process.run(command.not_nil!, [layout.keymap], output: output, error: error)
-    return CommandResult.ok(true) if status.success?
+    status = Process.run(command, [layout.keymap], output: output, error: error)
+    return nil if status.success?
 
     detail = error.to_s.strip
     detail = output.to_s.strip if detail.empty?
     detail = "exit status #{status.exit_code}" if detail.empty?
-    CommandResult.error(detail)
+    Failure.new(detail)
   rescue ex
-    CommandResult.error(ex.message || ex.class.name)
+    Failure.new(ex.message || ex.class.name)
   end
 
   def self.machine_details : MachineDetails
@@ -169,7 +186,7 @@ module Platform
     [vendor, product, version]
       .compact
       .reject { |part| part.empty? || part.downcase == "to be filled by o.e.m." }
-      .uniq
+      .uniq!
       .join(" ")
       .presence || run_command("sysctl", ["-n", "hw.model"])
   end
@@ -190,7 +207,7 @@ module Platform
     command = lsblk_command
     return [] of Tuple(String, String) if command.nil?
 
-    lines = run_command(command.not_nil!, ["-o", "NAME,SIZE,TYPE,MOUNTPOINTS", "-n"]).try(&.lines.map(&.strip).reject(&.empty?)) || [] of String
+    lines = run_command(command, ["-o", "NAME,SIZE,TYPE,MOUNTPOINTS", "-n"]).try(&.lines.map(&.strip).reject(&.empty?)) || [] of String
     return [] of Tuple(String, String) if lines.empty?
 
     lines.first(8).map_with_index do |line, i|

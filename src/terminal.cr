@@ -1,4 +1,4 @@
-require "./result"
+require "./failure"
 require "./keyboard_layout"
 require "./platform"
 require "./logger"
@@ -28,7 +28,7 @@ module Colors
 end
 
 module Terminal
-  alias Credentials = Result({String, String, KeyboardLayout})
+  record LoginInput, username : String, password : String, layout : KeyboardLayout
   CTRL_L    = 0x0c_u8
   BACKSPACE = 0x08_u8
   DELETE    = 0x7f_u8
@@ -40,21 +40,45 @@ module Terminal
     STDOUT.print "\e%G\e(B\x0f"
   end
 
-  def self.read_auth_inputs(layout : KeyboardLayout, panel_width : Int32) : Credentials
-    username_result = read_line_with_layout_toggle(5, "login:", false, layout, panel_width)
-    return Credentials.error(username_result.error.not_nil!) unless username_result.is_ok?
+  def self.read_auth_inputs(layout : KeyboardLayout, panel_width : Int32) : LoginInput | Failure
+    username_line = read_line_with_layout_toggle(5, "login:", false, layout, panel_width)
+    return username_line if username_line.is_a?(Failure)
 
-    username, layout = username_result.value.not_nil!
+    username, layout = username_line
     username = username.strip
-    return Credentials.error("Empty username") if username.empty?
+    return Failure.new("Empty username") if username.empty?
 
-    password_result = read_line_with_layout_toggle(6, "Password:", true, layout, panel_width)
-    return Credentials.error(password_result.error.not_nil!) unless password_result.is_ok?
+    password_line = read_line_with_layout_toggle(6, "Password:", true, layout, panel_width)
+    return password_line if password_line.is_a?(Failure)
 
-    password, layout = password_result.value.not_nil!
-    return Credentials.error("Empty password") if password.empty?
+    password, layout = password_line
+    return Failure.new("Empty password") if password.empty?
 
-    Credentials.ok({username, password, layout})
+    LoginInput.new(username, password, layout)
+  end
+
+  # Feed one input byte into the line being edited.  `pending` holds the
+  # bytes of a UTF-8 sequence that is not complete yet.  Returns the new
+  # text and pending bytes; invalid sequences are dropped.
+  def self.feed(text : String, pending : Bytes, byte : UInt8) : {String, Bytes}
+    case byte
+    when BACKSPACE, DELETE
+      {text.rchop, Bytes.empty}
+    else
+      return {text, pending} if byte < 32
+
+      bytes = Bytes.new(pending.size + 1)
+      pending.copy_to(bytes)
+      bytes[pending.size] = byte
+      chunk = String.new(bytes)
+      if chunk.valid_encoding?
+        {text + chunk, Bytes.empty}
+      elsif bytes.size >= 4
+        {text, Bytes.empty}
+      else
+        {text, bytes}
+      end
+    end
   end
 
   def self.clear_screen
@@ -88,7 +112,7 @@ module Terminal
   def self.draw_sidebar : {Int32, Int32}
     rows, cols = term_size
     bar_col = Math.max(cols // 5, 4)
-    rows.times { |r| STDOUT.print "\e[#{r + 1};#{bar_col}H#{Colors::DIM}│#{Colors::RESET}" }
+    rows.times { |row| STDOUT.print "\e[#{row + 1};#{bar_col}H#{Colors::DIM}│#{Colors::RESET}" }
     STDOUT.flush
     {bar_col + 2, rows}
   end
@@ -115,32 +139,12 @@ module Terminal
     STDOUT.flush
   end
 
-  def self.read_password : String
-    fd = STDIN.fd
-    old_term = LibC::Termios.new
-    LibC.tcgetattr(fd, pointerof(old_term))
-
-    begin
-      silent = old_term
-      # Clear the ECHO flag to suppress character echo.
-      silent.c_lflag = old_term.c_lflag & ~LibC::ECHO.to_u32
-      LibC.tcsetattr(fd, LibC::TCSANOW, pointerof(silent))
-      STDIN.gets(chomp: true) || ""
-    ensure
-      # Restore original terminal settings unconditionally.
-      LibC.tcsetattr(fd, LibC::TCSANOW, pointerof(old_term))
-    end
-  end
-
-  private alias LineResult = Result({String, KeyboardLayout})
-
-  private def self.read_line_with_layout_toggle(row : Int32, prompt : String, hidden : Bool, layout : KeyboardLayout, panel_width : Int32) : LineResult
+  private def self.read_line_with_layout_toggle(row : Int32, prompt : String, hidden : Bool, layout : KeyboardLayout, panel_width : Int32) : {String, KeyboardLayout} | Failure
     prompt_text = "#{prompt} "
     prompt_col = prompt_text.size + 1
     input_width = [panel_width - prompt_text.size, 1].max
-    buffer = ""
-    # Bytes of a UTF-8 sequence that is not complete yet.
-    pending = IO::Memory.new
+    text = ""
+    pending = Bytes.empty
 
     STDOUT.print "\e[#{row};1H#{Colors::PROMPT}#{prompt}#{Colors::RESET} "
     STDOUT.print " " * input_width
@@ -150,33 +154,23 @@ module Terminal
     with_noncanonical_input do
       loop do
         byte = STDIN.read_byte
-        return LineResult.error("Input error") if byte.nil?
+        return Failure.new("Input error") if byte.nil?
 
         case byte
         when 0x0d_u8, 0x0a_u8
           STDOUT.print "\e[#{row + 1};1H"
           STDOUT.flush
-          return LineResult.ok({buffer, layout})
+          return {text, layout}
         when CTRL_L
           next_layout = layout.toggle
           layout = next_layout if apply_keymap_feedback(next_layout, panel_width)
-          redraw_input(row, prompt_col, input_width, buffer, hidden)
-        when BACKSPACE, DELETE
-          unless buffer.empty?
-            buffer = buffer.rchop
-            redraw_input(row, prompt_col, input_width, buffer, hidden)
-          end
+          redraw_input(row, prompt_col, input_width, text, hidden)
         else
-          next if byte < 32
-          pending.write_byte(byte)
-          chunk = String.new(pending.to_slice)
-          if chunk.valid_encoding?
-            buffer += chunk
-            pending.clear
-            redraw_input(row, prompt_col, input_width, buffer, hidden)
-          elsif pending.size >= 4
-            pending.clear # not valid UTF-8; drop it
-          end
+          edited, pending = feed(text, pending, byte)
+          next if edited == text
+
+          text = edited
+          redraw_input(row, prompt_col, input_width, text, hidden)
         end
       end
     end
@@ -227,21 +221,18 @@ module Terminal
   end
 
   def self.apply_keymap_feedback(layout : KeyboardLayout, panel_width : Int32) : Bool
-    result = Platform.apply_keymap(layout)
-    if result.is_ok?
+    failure = Platform.apply_keymap(layout)
+    if failure.nil?
       prepare_display
       draw_keyboard_layout(layout, panel_width)
       Logger.info("keyboard.layout_changed", "Keyboard layout changed", {layout: layout.keymap})
       true
     else
-      Logger.warn("keyboard.layout_change_failed", "Keyboard layout change failed", {layout: layout.keymap, error: result.error})
+      Logger.warn("keyboard.layout_change_failed", "Keyboard layout change failed", {layout: layout.keymap, error: failure.message})
       msg = "layout failed: #{layout.label}"
       STDOUT.print "\e[8;1H#{Colors::ERROR}#{msg[0, panel_width].ljust(panel_width)}#{Colors::RESET}"
       STDOUT.flush
       false
     end
-  end
-
-  def self.menu
   end
 end

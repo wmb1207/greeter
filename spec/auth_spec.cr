@@ -1,19 +1,6 @@
 require "spec"
 require "../src/auth"
 
-describe Result do
-  it "keeps the error of a failed result" do
-    result = Result(Int32).error("boom")
-
-    result.is_ok?.should be_false
-    result.error.should eq("boom")
-  end
-
-  it "is ok when built from a value" do
-    Result.ok(1).is_ok?.should be_true
-  end
-end
-
 describe "pam_conversation" do
   it "answers a hidden prompt with the password" do
     prompt = "Password: "

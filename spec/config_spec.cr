@@ -55,3 +55,29 @@ describe Config do
     end
   end
 end
+
+describe "Config vt" do
+  after_each { Logger.reset_sink }
+
+  it "falls back to vt 1 for an out-of-range vt" do
+    sink = IO::Memory.new
+    Logger.sink = sink
+
+    File.tempfile("greeter-config") do |file|
+      file.print "vt: 99\n"
+      file.flush
+
+      Config.load(file.path).vt.should eq(1)
+      sink.to_s.should contain("config.invalid_vt")
+    end
+  end
+
+  it "keeps a valid vt" do
+    File.tempfile("greeter-config") do |file|
+      file.print "vt: 2\n"
+      file.flush
+
+      Config.load(file.path).vt.should eq(2)
+    end
+  end
+end

@@ -43,8 +43,10 @@ struct Config
     MenuEntry.new(MenuAction::Reboot, "reboot"),
     MenuEntry.new(MenuAction::Shutdown, "shutdown"),
     MenuEntry.new(MenuAction::SSH, "ssh"),
-    MenuEntry.new(MenuAction::Moonlight, "moonlight desktop.wmb.arpa", "desktop.wmb.arpa"),
   ]
+
+  # Linux supports VTs 1..63.
+  VALID_VTS = 1..63
 
   def self.load(path : String = CONFIG_PATH) : Config
     return new unless File.exists?(path)
@@ -56,7 +58,7 @@ struct Config
 
   private def self.parse(doc : YAML::Any) : Config
     title = doc["title"]?.try(&.as_s) || "Greeter"
-    vt = doc["vt"]?.try(&.as_i) || 1
+    vt = parse_vt(doc["vt"]?.try(&.as_i))
     seat = doc["seat"]?.try(&.as_s) || "seat0"
     default_keyboard_layout = parse_keyboard_layout(doc["default_keyboard_layout"]?.try(&.as_s))
 
@@ -76,10 +78,18 @@ struct Config
     )
   end
 
+  private def self.parse_vt(value : Int32?) : Int32
+    return 1 if value.nil?
+    return value if VALID_VTS.includes?(value)
+
+    Logger.warn("config.invalid_vt", "Invalid vt; using default", {vt: value})
+    1
+  end
+
   private def self.parse_keyboard_layout(value : String?) : KeyboardLayout
     return KeyboardLayout::US if value.nil?
 
-    KeyboardLayout.parse(value.not_nil!) || begin
+    KeyboardLayout.parse(value) || begin
       Logger.warn("config.invalid_keyboard_layout", "Invalid keyboard layout; using default", {layout: value})
       KeyboardLayout::US
     end

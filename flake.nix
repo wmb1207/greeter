@@ -9,6 +9,57 @@
       system = "x86_64-linux";
       pkgs   = nixpkgs.legacyPackages.${system};
       lib    = nixpkgs.lib;
+
+      # Test machine shared by `nix run .#vm` and the e2e check.
+      # Test credentials:  user=test  password=test
+      vmModule = { config, pkgs, ... }: {
+        system.stateVersion = "24.11";
+
+        # Minimal bootloader (not needed for VM but required by NixOS)
+        boot.loader.grub.device = "nodev";
+
+        networking.hostName = "greeter-test";
+
+        # Test user — password is "test"
+        users.users.test = {
+          isNormalUser = true;
+          initialPassword = "test";
+          extraGroups = [ "video" "input" ];
+        };
+
+        # Packages available in the VM session.
+        # WM packages ship share/xsessions/*.desktop files; installing them
+        # here makes those files appear under
+        # /run/current-system/sw/share/xsessions/ — exactly where the
+        # greeter scans for sessions.
+        environment.systemPackages = with pkgs; [
+          fvwm3
+          niri
+          xwayland-satellite
+          openbox
+          xinit
+          xorg-server
+          xrandr
+          rxvt-unicode
+          openssh
+        ];
+
+        # Allow SSH connections for testing the SSH menu option
+        services.openssh.enable = true;
+
+        # ── greeter ──────────────────────────────────────────────
+        services.crystal-greeter = {
+          enable  = true;
+          package = self.packages.${system}.default;
+          title   = "greeter-test VM";
+          menu = [
+            { action = "exit";     label = null; host = null; }
+            { action = "reboot";   label = null; host = null; }
+            { action = "shutdown"; label = null; host = null; }
+            { action = "ssh";      label = null; host = null; }
+          ];
+        };
+      };
     in {
 
       # ── installable package ─────────────────────────────────────────────
@@ -74,55 +125,19 @@
         inherit system;
         modules = [
           self.nixosModules.default
-          ({ config, pkgs, ... }: {
-            system.stateVersion = "24.11";
-
-            # Minimal bootloader (not needed for VM but required by NixOS)
-            boot.loader.grub.device = "nodev";
-
-            networking.hostName = "greeter-test";
-
-            # Test user — password is "test"
-            users.users.test = {
-              isNormalUser = true;
-              initialPassword = "test";
-              extraGroups = [ "video" "input" ];
-            };
-
-            # Packages available in the VM session.
-            # WM packages ship share/xsessions/*.desktop files; installing them
-            # here makes those files appear under
-            # /run/current-system/sw/share/xsessions/ — exactly where the
-            # greeter scans for sessions.
-            environment.systemPackages = with pkgs; [
-              fvwm3
-              niri
-              xwayland-satellite
-              openbox
-              xinit
-              xorg-server
-              xrandr
-              rxvt-unicode
-              openssh
-            ];
-
-            # Allow SSH connections for testing the SSH menu option
-            services.openssh.enable = true;
-
-            # ── greeter ──────────────────────────────────────────────
-            services.crystal-greeter = {
-              enable  = true;
-              package = self.packages.${system}.default;
-              title   = "greeter-test VM";
-              menu = [
-                { action = "exit";     label = null; host = null; }
-                { action = "reboot";   label = null; host = null; }
-                { action = "shutdown"; label = null; host = null; }
-                { action = "ssh";      label = null; host = null; }
-              ];
-            };
-          })
+          vmModule
         ];
+      };
+
+      # ── end-to-end test ─────────────────────────────────────────────────
+      # Boots the test machine and drives the greeter on tty1.
+      # Run with:  nix build .#checks.x86_64-linux.e2e  (or: nix flake check)
+      checks.${system}.e2e = pkgs.testers.runNixOSTest {
+        name = "crystal-greeter-e2e";
+        nodes.greeter = {
+          imports = [ self.nixosModules.default vmModule ];
+        };
+        testScript = builtins.readFile ./tests/e2e.py;
       };
 
       apps.${system}.vm = {
@@ -141,17 +156,20 @@
           pkgs.linux-pam    # libpam.so + headers for FFI binding
           pkgs.crystalline  # Crystal LSP server
           pkgs.pkg-config   # needed by crystalline to resolve lib flags
+          pkgs.ameba        # linter (make lint)
         ];
 
         shellHook = ''
           echo ""
           echo "  crystal-greeter dev shell"
           echo "  ─────────────────────────────────────────"
+          echo "  make lint     format check + ameba"
           echo "  make debug    fast debug build  → ./greeter"
           echo "  make build    release build     → ./greeter"
           echo "  make install  install setuid-root to /usr/local/bin"
           echo "  nix build     build via Nix     → ./result/bin/crystal-greeter"
           echo "  nix run .#vm  run a vm to test the greeter"
+          echo "  nix build .#checks.x86_64-linux.e2e   end-to-end test"
           echo ""
         '';
       };

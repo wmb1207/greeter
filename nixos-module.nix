@@ -128,7 +128,14 @@ in
     # Make sure xsession .desktop files from installed WMs are linked
     # into /run/current-system/sw/share/xsessions/
     environment.pathsToLink = [ "/share/xsessions" "/share/wayland-sessions" ];
-    environment.systemPackages = [ pkgs.kbd ];
+    # kbd: loadkeys for the layout toggle.  xinit + xauth: startx and the
+    # authority file it writes, for X11 sessions; startx is looked up on the
+    # system PATH (/run/current-system/sw/bin).
+    environment.systemPackages = [
+      pkgs.kbd
+      (pkgs.xinit or pkgs.xorg.xinit)
+      (pkgs.xauth or pkgs.xorg.xauth)
+    ];
 
     # Install as a setuid-root wrapper (required for PAM + privilege drop)
     security.wrappers.crystal-greeter = {

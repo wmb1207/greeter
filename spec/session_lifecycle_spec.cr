@@ -1,9 +1,10 @@
 require "spec"
 require "../src/sessions"
+require "../src/supervisor"
 
 describe Account do
   it "copies the passwd entry of an existing user" do
-    account = Account.find("root").not_nil!
+    account = Account.find("root").should be_a(Account)
 
     account.name.should eq("root")
     account.uid.should eq(0)
@@ -28,19 +29,19 @@ describe SessionTracker do
   end
 end
 
-describe Sessions do
+describe Supervisor do
   after_each { Logger.reset_sink }
 
   it "logs a clean exit as info and a signal as warn" do
     sink = IO::Memory.new
     Logger.sink = sink
 
-    Sessions.log_session_end("x11", Process::Status.new(0), {username: "alice"})
-    Sessions.log_session_end("x11", Process::Status.new(Signal::KILL.value), {username: "alice"})
-    Sessions.log_session_end("ssh", nil, {username: "alice"})
+    Supervisor.log_end("x11", Process::Status.new(0), {username: "alice"})
+    Supervisor.log_end("x11", Process::Status.new(Signal::KILL.value), {username: "alice"})
+    Supervisor.log_end("ssh", nil, {username: "alice"})
 
     records = sink.to_s.lines.map { |line| JSON.parse(line) }
-    records.map { |r| {r["event"].as_s, r["level"].as_s} }.should eq([
+    records.map { |record| {record["event"].as_s, record["level"].as_s} }.should eq([
       {"session.x11.ended", "info"},
       {"session.x11.ended", "warn"},
       {"session.ssh.ended", "warn"},
@@ -53,10 +54,10 @@ describe Sessions do
     Logger.sink = IO::Memory.new
     pid = LibC.fork
     if pid == 0
-      Sessions.in_child("spec.child") { }
+      Supervisor.in_child("spec.child") { }
     end
 
-    status = Sessions.wait_child(pid).not_nil!
+    status = Supervisor.wait(pid).should be_a(Process::Status)
     status.exit_code.should eq(1)
   end
 end
